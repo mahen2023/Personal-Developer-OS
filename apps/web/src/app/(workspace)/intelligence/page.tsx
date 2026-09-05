@@ -1,555 +1,521 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
-  CornerDownLeft,
-  Database,
-  ListTree,
-  RefreshCw,
+  Archive,
+  Cpu,
+  Layers,
+  Lock,
+  MessageSquarePlus,
+  Pin,
+  Search,
+  Settings2,
   Telescope,
-  TriangleAlert,
+  Trash2,
 } from 'lucide-react';
-import { ApiError, api } from '@/lib/api';
+import { api } from '@/lib/api';
 import { cx, timeAgo } from '@/lib/format';
-import { humanise } from '@/lib/domain';
-import { useAction } from '@/hooks/useResource';
+import {
+  type Conversation,
+  type ModeDefinition,
+  type OllamaModel,
+  type OllamaStatus,
+  type Providers,
+} from '@/lib/intelligence';
 import { useContextPanel } from '@/components/shell/ContextPanel';
-import { PanelDivider, PanelSection } from '@/components/patterns/DetailShell';
-import { Button, SIGNAL_COLOR, type Signal, StatusIndicator } from '@/components/primitives';
-import { PageHeader } from '@/components/patterns/PageShell';
-
-/* ── what the API says ────────────────────────────────────────────────────── */
-
-interface Citation {
-  index: number;
-  entityType: string;
-  entityId: string;
-  title: string;
-  href: string;
-  excerpt: string;
-  score: number;
-}
-
-interface Row {
-  title: string;
-  detail?: string;
-  when?: string;
-  href: string;
-  signal?: Signal;
-}
-
-interface Answer {
-  question: string;
-  mode: 'records' | 'knowledge';
-  headline: string;
-  prose: string | null;
-  generatedBy: string | null;
-  citations: Citation[];
-  rows: Row[];
-  note: string | null;
-}
-
-interface Status {
-  generation: boolean;
-  generationModel: string | null;
-  embeddingModel: string;
-  matching: 'lexical' | 'semantic';
-  sources: string[];
-  index: {
-    chunks: number;
-    records: number;
-    byType: { entityType: string; records: number; chunks: number }[];
-    models: string[];
-    lastIndexedAt: string | null;
-  };
-}
+import { Button, KeyHint, LoadingLine, StatusIndicator } from '@/components/primitives';
+import { Composer, ModelSwitcher } from './Composer';
+import { Transcript } from './Transcript';
+import { useConsole } from './useConsole';
+import { ConsoleContext, EngineBanner } from './ConsoleContext';
+import { AttachPicker } from './AttachPicker';
 
 /**
- * The intelligence console (§75).
+ * The Developer Intelligence console (§7, §66).
  *
- * Deliberately not a chat. There is no conversation, no assistant persona and
- * nothing pretending to think: you ask, and it either runs a query or returns
- * passages you wrote, with the record attached. An instrument reports its own
- * calibration, which is what the strip under the input is for — it says which
- * model is loaded and whether it matches words or meaning, so you can tell
- * before asking whether the answer is worth trusting.
+ * Three areas, as §8 asks: conversations on the left, the transcript in the
+ * middle, and context on the right — the last of which is the workspace's own
+ * context panel rather than a third column of its own, so it collapses with
+ * the same key as every other panel in the application and the console does not
+ * invent a second way to hide something.
+ *
+ * The whole screen is deliberately not a chat client. It fills the viewport
+ * like a terminal, scrolls only in the transcript, and puts the machine state —
+ * engine, model, mode, private — on permanent display. You should be able to
+ * tell at a glance what is about to answer you and what it can see.
  */
-export default function IntelligencePage() {
-  const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState<Answer | null>(null);
-  const [status, setStatus] = useState<Status | null>(null);
-  const [history, setHistory] = useState<string[]>([]);
-  const input = useRef<HTMLTextAreaElement>(null);
+export default function IntelligenceConsolePage() {
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [status, setStatus] = useState<OllamaStatus | null>(null);
+  const [models, setModels] = useState<OllamaModel[]>([]);
+  const [providers, setProviders] = useState<Providers | null>(null);
+  const [filter, setFilter] = useState('recent');
+  const [query, setQuery] = useState('');
+  const [switching, setSwitching] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const [booted, setBooted] = useState(false);
 
-  const refreshStatus = useCallback(async () => {
-    setStatus(await api<Status>('/ai/status').catch(() => null));
+  const console_ = useConsole(activeId);
+
+  const loadConversations = useCallback(async () => {
+    const page = await api<{ items: Conversation[] }>(
+      `/ai/conversations?filter=${filter}&limit=50${query.trim() ? `&q=${encodeURIComponent(query.trim())}` : ''}`,
+    ).catch(() => ({ items: [] }));
+    setConversations(page.items);
+    return page.items;
+  }, [filter, query]);
+
+  // The engine is asked once on arrival, not polled. A console that pings a
+  // local server every few seconds is a console that keeps a GPU awake.
+  useEffect(() => {
+    void (async () => {
+      const [engine, catalogue, meta, list] = await Promise.all([
+        api<OllamaStatus>('/ai/ollama/status').catch(() => null),
+        api<OllamaModel[]>('/ai/ollama/models').catch(() => []),
+        api<Providers>('/ai/providers').catch(() => null),
+        loadConversations(),
+      ]);
+      setStatus(engine);
+      setModels(catalogue);
+      setProviders(meta);
+      setActiveId((current) => current ?? list[0]?.id ?? null);
+      setBooted(true);
+    })();
+    // Only on mount: the filter effect below handles every later list refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    void refreshStatus();
-  }, [refreshStatus]);
+    if (booted) void loadConversations();
+  }, [booted, loadConversations]);
 
-  const ask = useAction((text: string) =>
-    api<Answer>('/ai/ask', { method: 'POST', body: { question: text } }),
+  // Memoised because `runCommand` depends on it: a fresh [] every render would
+  // rebuild the command handler, and with it the key listener, on every token.
+  const modes: ModeDefinition[] = useMemo(() => providers?.modes ?? [], [providers]);
+
+  const startConversation = useCallback(
+    async (seed?: Partial<Conversation>) => {
+      const created = await api<Conversation>('/ai/conversations', {
+        method: 'POST',
+        body: {
+          model: seed?.model ?? status?.chatModel ?? models[0]?.name,
+          mode: seed?.mode,
+          projectId: seed?.projectId ?? null,
+        },
+      }).catch(() => null);
+      if (!created) return null;
+      setConversations((current) => [created, ...current]);
+      setActiveId(created.id);
+      return created;
+    },
+    [models, status?.chatModel],
   );
 
-  const submit = useCallback(
+  /** Sending with no conversation open creates one, so the first ask just works. */
+  const send = useCallback(
     async (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed || ask.busy) return;
-      setQuestion(trimmed);
-      const result = await ask.run(trimmed);
-      if (!result) return;
-      setAnswer(result);
-      // Most recent first, no repeats — this is a scratchpad, not a transcript,
-      // and it is gone when the tab closes.
-      setHistory((previous) =>
-        [trimmed, ...previous.filter((item) => item !== trimmed)].slice(0, 12),
-      );
+      if (!activeId) {
+        const created = await startConversation();
+        if (!created) return;
+        // The hook is keyed on the id, so the send waits for it to be current.
+        window.setTimeout(() => void console_.send(text), 0);
+        return;
+      }
+      await console_.send(text);
+      await loadConversations();
     },
-    [ask],
+    [activeId, console_, loadConversations, startConversation],
+  );
+
+  const runCommand = useCallback(
+    async (command: string, argument: string) => {
+      if (command === '/new') {
+        await startConversation();
+      } else if (command === '/model') {
+        if (argument) await console_.update({ model: argument });
+        else setSwitching(true);
+      } else if (command === '/mode') {
+        const match = modes.find(
+          (mode) =>
+            mode.label.toLowerCase() === argument.toLowerCase() ||
+            mode.mode === argument.toUpperCase(),
+        );
+        if (match) await console_.update({ mode: match.mode });
+      } else if (command === '/clear') {
+        if (activeId) {
+          await api(`/ai/conversations/${activeId}`, { method: 'DELETE' }).catch(() => undefined);
+          setActiveId(null);
+          await loadConversations();
+        }
+      } else if (command === '/search') {
+        window.location.href = `/intelligence/retrieval?q=${encodeURIComponent(argument)}`;
+      } else if (command === '/context') {
+        // Nothing to run: the panel already shows it. Saying so beats silence.
+        window.alert(
+          'The context panel on the right lists everything the assistant can see for this conversation.',
+        );
+      }
+    },
+    [activeId, console_, loadConversations, modes, startConversation],
+  );
+
+  // §52. Registered here rather than in the global layer because they only
+  // mean anything on this screen, and Escape must not steal from a dialog.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const meta = event.metaKey || event.ctrlKey;
+      if (meta && event.shiftKey && event.key.toLowerCase() === 'm') {
+        event.preventDefault();
+        setSwitching(true);
+      }
+      if (event.key === 'Escape' && console_.streaming) {
+        event.preventDefault();
+        console_.stop();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [console_]);
+
+  const attachments = useMemo(
+    () =>
+      (console_.conversation?.attached ?? []).map((ref) => ({
+        ref,
+        label: ref.split(':')[0].replace(/_/g, ' ').toLowerCase(),
+      })),
+    [console_.conversation?.attached],
   );
 
   useContextPanel(
-    'Index',
-    <IndexPanel status={status} history={history} onRun={submit} onRebuilt={refreshStatus} />,
-    [status, history.length, ask.busy],
+    'Console',
+    <ConsoleContext
+      status={status}
+      settings={providers?.settings ?? null}
+      conversation={console_.conversation}
+      modes={modes}
+      selectableSources={providers?.sources ?? []}
+      onChange={console_.update}
+      onSwitchModel={() => setSwitching(true)}
+    />,
+    [status, providers, console_.conversation, console_.messages.length],
   );
 
+  if (!booted) return <LoadingLine message="Reaching the local engine…" />;
+
   return (
-    <div className="mx-auto max-w-[880px] px-6 pb-16 pt-6">
-      <PageHeader
-        icon={Telescope}
-        title="Intelligence"
-        subtitle="Ask about your own records. Every answer names where it came from."
-      />
-
-      <QueryBar
-        value={question}
-        onChange={setQuestion}
-        onSubmit={submit}
-        busy={ask.busy}
-        inputRef={input}
-      />
-
-      <Calibration status={status} />
-
-      {ask.error && <ErrorNote error={ask.error} />}
-
-      {answer ? (
-        <AnswerView answer={answer} />
-      ) : (
-        <Suggestions
-          matching={status?.matching}
-          onPick={(text) => {
-            setQuestion(text);
-            void submit(text);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-/* ── the input ────────────────────────────────────────────────────────────── */
-
-function QueryBar({
-  value,
-  onChange,
-  onSubmit,
-  busy,
-  inputRef,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  onSubmit: (value: string) => void;
-  busy: boolean;
-  inputRef: React.RefObject<HTMLTextAreaElement | null>;
-}) {
-  return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-        onSubmit(value);
-      }}
-      className="flex items-start gap-2 rounded border border-line bg-[var(--surface-raised)] p-2 focus-within:border-[var(--accent-line)]"
-    >
-      <textarea
-        ref={inputRef}
-        value={value}
-        rows={2}
-        autoFocus
-        aria-label="Question"
-        placeholder="Why did the staging deploy fail last month?"
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          // Enter asks; shift-enter is a newline. A question is usually one
-          // line, so the fast path should be the common one.
-          if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault();
-            onSubmit(value);
-          }
-        }}
-        className="min-h-[42px] flex-1 resize-none bg-transparent px-1 py-[3px] text-[13.5px] leading-relaxed outline-none placeholder:text-[var(--text-faint)]"
-      />
-      <Button type="submit" variant="primary" disabled={busy || !value.trim()} className="shrink-0">
-        {busy ? 'Looking…' : 'Ask'}
-        {!busy && <CornerDownLeft size={12} />}
-      </Button>
-    </form>
-  );
-}
-
-/**
- * The instrument's own readings. Plain monospace facts, no reassurance: if
- * matching is lexical and generation is off, the strip says so, and the answer
- * below can be read in that light.
- */
-function Calibration({ status }: { status: Status | null }) {
-  if (!status) return <div className="h-[26px]" />;
-
-  const lexical = status.matching === 'lexical';
-  return (
-    <div className="mono flex flex-wrap items-center gap-x-4 gap-y-1 px-1 py-[7px] text-[11px] text-[var(--text-faint)]">
-      <span className="flex items-center gap-[6px]">
-        <StatusIndicator
-          signal={status.index.chunks > 0 ? 'success' : 'warning'}
-          label={`${status.index.records} records indexed`}
-        />
-      </span>
-      <span title={status.embeddingModel}>
-        {lexical ? 'matching words' : 'matching meaning'} · {status.embeddingModel}
-      </span>
-      <span>
-        {status.generation
-          ? `written answers · ${status.generationModel}`
-          : 'written answers off — passages only'}
-      </span>
-    </div>
-  );
-}
-
-/* ── the answer ───────────────────────────────────────────────────────────── */
-
-function AnswerView({ answer }: { answer: Answer }) {
-  return (
-    <section className="anim-enter mt-4" aria-label="Answer">
-      <div className="mb-3 flex items-baseline gap-2 border-b border-line pb-2">
-        <span
-          className="label shrink-0"
-          style={{ color: answer.mode === 'records' ? 'var(--info)' : 'var(--accent)' }}
-        >
-          {answer.mode === 'records' ? 'From your records' : 'From what you wrote'}
-        </span>
-        <h2 className="min-w-0 flex-1 text-[13.5px] font-medium">{answer.headline}</h2>
-      </div>
-
-      {answer.prose && (
-        <div className="mb-4 border-l-2 border-[var(--accent-line)] pl-3 text-[13.5px] leading-[1.65]">
-          <Prose text={answer.prose} citations={answer.citations} />
-          <p className="mono mt-2 text-[10.5px] text-[var(--text-faint)]">
-            written by {answer.generatedBy} from the sources below — check them
-          </p>
+    <div className="flex h-[calc(100vh-var(--topbar-h)-var(--statusbar-h))] min-h-0">
+      <aside className="hidden w-[236px] shrink-0 flex-col border-r border-line bg-[var(--surface-sunken)] md:flex">
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
+          <span className="label flex-1">Conversations</span>
+          <button
+            onClick={() => void startConversation()}
+            title="New conversation"
+            aria-label="New conversation"
+            className="text-[var(--text-faint)] transition-colors hover:text-[var(--accent)]"
+          >
+            <MessageSquarePlus size={13} />
+          </button>
         </div>
-      )}
 
-      {answer.note && !answer.prose && (
-        <p className="mb-3 text-[12.5px] text-[var(--text-muted)]">{answer.note}</p>
-      )}
+        <div className="flex items-center gap-1 border-b border-line px-2 py-[5px]">
+          <Search size={11} className="text-[var(--text-faint)]" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search"
+            className="w-full bg-transparent text-[11.5px] outline-none placeholder:text-[var(--text-faint)]"
+          />
+        </div>
 
-      {answer.rows.length > 0 && <RecordTable rows={answer.rows} />}
-      {answer.citations.length > 0 && <Sources citations={answer.citations} />}
-    </section>
-  );
-}
-
-/**
- * Renders the model's prose, turning each `[n]` marker into a link to the
- * source it points at. A claim you cannot click through to is a claim you
- * cannot check.
- */
-function Prose({ text, citations }: { text: string; citations: Citation[] }) {
-  const parts = text.split(/(\[\d+\])/g);
-  return (
-    <p className="whitespace-pre-wrap">
-      {parts.map((part, index) => {
-        const marker = /^\[(\d+)\]$/.exec(part);
-        const cited = marker && citations[Number(marker[1]) - 1];
-        if (!cited) return <span key={index}>{part}</span>;
-        return (
-          <Link
-            key={index}
-            href={cited.href}
-            title={cited.title}
-            className="mono mx-[2px] rounded-sm border border-[var(--accent-line)] bg-[var(--accent-dim)] px-[3px] text-[10px] align-super text-[var(--accent)] hover:bg-[color-mix(in_srgb,var(--accent)_22%,transparent)]"
-          >
-            {marker[1]}
-          </Link>
-        );
-      })}
-    </p>
-  );
-}
-
-/** Structured answers are a table, because that is what they are. */
-function RecordTable({ rows }: { rows: Row[] }) {
-  return (
-    <ul className="overflow-hidden rounded border border-line bg-[var(--surface-raised)]">
-      {rows.map((row, index) => (
-        <li key={`${row.href}-${index}`} className="border-b border-line last:border-b-0">
-          <Link
-            href={row.href}
-            className="flex items-center gap-3 px-3 py-[7px] transition-colors duration-[var(--fast)] hover:bg-[var(--surface-hover)]"
-          >
-            <span
-              aria-hidden
-              className="h-[7px] w-[7px] shrink-0 rounded-full"
-              style={{ background: SIGNAL_COLOR[row.signal ?? 'neutral'] }}
-            />
-            <span className="min-w-0 flex-1 truncate text-[12.5px]">{row.title}</span>
-            {row.detail && (
-              <span className="hidden shrink-0 truncate text-[11.5px] text-[var(--text-muted)] sm:block">
-                {row.detail}
-              </span>
-            )}
-            {row.when && (
-              <span className="mono w-[74px] shrink-0 text-right text-[11px] text-[var(--text-faint)]">
-                {timeAgo(row.when)}
-              </span>
-            )}
-          </Link>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-/**
- * The passages themselves, numbered to match the citation markers. Shown in
- * full rather than summarised — your own words are the most trustworthy thing
- * on this page.
- */
-function Sources({ citations }: { citations: Citation[] }) {
-  return (
-    <div className="mt-4">
-      <div className="label mb-2 flex items-center gap-2">
-        Sources
-        <span className="h-px flex-1 bg-[var(--line)]" />
-      </div>
-      <ol className="flex flex-col gap-2">
-        {citations.map((citation) => (
-          <li key={citation.entityId} className="flex gap-3">
-            <span className="mono mt-[2px] h-[18px] w-[18px] shrink-0 rounded-sm border border-line bg-[var(--surface-raised)] text-center text-[10px] leading-[17px] text-[var(--text-faint)]">
-              {citation.index}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-baseline gap-2">
-                <Link
-                  href={citation.href}
-                  className="truncate text-[12.5px] font-medium hover:text-[var(--accent)]"
-                >
-                  {citation.title}
-                </Link>
-                <span className="mono shrink-0 text-[10.5px] text-[var(--text-faint)]">
-                  {humanise(citation.entityType)} · {citation.score.toFixed(2)}
-                </span>
-              </div>
-              <p className="mt-[3px] whitespace-pre-wrap rounded border border-line bg-[var(--surface-sunken)] px-[9px] py-[6px] text-[12px] leading-relaxed text-[var(--text-muted)]">
-                {citation.excerpt}
-              </p>
-            </div>
-          </li>
-        ))}
-      </ol>
-    </div>
-  );
-}
-
-function ErrorNote({ error }: { error: ApiError }) {
-  return (
-    <p
-      role="alert"
-      aria-label="Error"
-      className="mt-3 flex items-start gap-2 rounded border border-[color-mix(in_srgb,var(--danger)_40%,transparent)] bg-[var(--danger-dim)] px-3 py-2 text-[12.5px] text-[var(--danger)]"
-    >
-      <TriangleAlert size={13} className="mt-[2px] shrink-0" />
-      {error.message}
-    </p>
-  );
-}
-
-/* ── discoverability ──────────────────────────────────────────────────────── */
-
-/** Questions the database answers exactly, and questions retrieval answers. */
-const EXACT = [
-  'What expires in the next 60 days?',
-  'How many issues are still open?',
-  'What is due this week?',
-  'What did I deploy recently?',
-  'Which projects are active?',
-];
-
-const WRITTEN = [
-  'How did I fix the connection pool problem?',
-  'Why did we choose this database?',
-  'What did we decide in the last meeting?',
-];
-
-/**
- * A console that cannot say what it answers is a guessing game. These are the
- * real intents, listed literally — the left column runs a query, the right
- * searches what you have written.
- */
-function Suggestions({
-  matching,
-  onPick,
-}: {
-  matching?: 'lexical' | 'semantic';
-  onPick: (question: string) => void;
-}) {
-  return (
-    <div className="mt-6 grid gap-6 sm:grid-cols-2">
-      <Column
-        icon={Database}
-        title="Answered by a query"
-        hint="Exact, current, counted from your records."
-        items={EXACT}
-        onPick={onPick}
-      />
-      <Column
-        icon={ListTree}
-        title="Answered from your writing"
-        hint={
-          matching === 'lexical'
-            ? 'Notes, solutions, decisions and meetings. Matched on words, so use the terms you would have written.'
-            : 'Notes, solutions, decisions and meetings, matched on meaning.'
-        }
-        items={WRITTEN}
-        onPick={onPick}
-      />
-    </div>
-  );
-}
-
-function Column({
-  icon: Icon,
-  title,
-  hint,
-  items,
-  onPick,
-}: {
-  icon: typeof Database;
-  title: string;
-  hint: string;
-  items: string[];
-  onPick: (question: string) => void;
-}) {
-  return (
-    <section>
-      <div className="label mb-1 flex items-center gap-[6px]">
-        <Icon size={12} />
-        {title}
-      </div>
-      <p className="mb-2 text-[12px] leading-relaxed text-[var(--text-faint)]">{hint}</p>
-      <ul className="flex flex-col">
-        {items.map((item) => (
-          <li key={item}>
+        <div className="flex gap-[3px] border-b border-line px-2 py-[5px]">
+          {['recent', 'pinned', 'archived', 'all'].map((option) => (
             <button
-              onClick={() => onPick(item)}
-              className="w-full border-b border-line py-[7px] text-left text-[12.5px] text-[var(--text-muted)] transition-colors duration-[var(--fast)] hover:text-[var(--accent)]"
+              key={option}
+              onClick={() => setFilter(option)}
+              className={cx(
+                'rounded-sm px-[6px] py-[2px] text-[10.5px] capitalize transition-colors',
+                filter === option
+                  ? 'bg-[var(--accent-dim)] text-[var(--accent)]'
+                  : 'text-[var(--text-faint)] hover:text-[var(--text-muted)]',
+              )}
             >
-              {item}
+              {option}
             </button>
-          </li>
-        ))}
-      </ul>
-    </section>
+          ))}
+        </div>
+
+        <ul className="flex-1 overflow-y-auto">
+          {conversations.length === 0 && (
+            <li className="px-3 py-4 text-[11.5px] leading-relaxed text-[var(--text-faint)]">
+              Nothing here yet. Ask something below and this fills in.
+            </li>
+          )}
+          {conversations.map((row) => (
+            <li key={row.id}>
+              <button
+                onClick={() => setActiveId(row.id)}
+                className={cx(
+                  'group flex w-full flex-col gap-[2px] border-b border-line px-3 py-[7px] text-left transition-colors',
+                  row.id === activeId
+                    ? 'bg-[var(--surface-hover)]'
+                    : 'hover:bg-[var(--surface-hover)]',
+                )}
+              >
+                <span className="flex w-full items-center gap-[5px]">
+                  {row.isPinned && <Pin size={9} className="shrink-0 text-[var(--accent)]" />}
+                  {row.isArchived && (
+                    <Archive size={9} className="shrink-0 text-[var(--text-faint)]" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate text-[12px]">{row.title}</span>
+                </span>
+                <span className="mono flex w-full items-center gap-2 text-[10px] text-[var(--text-faint)]">
+                  <span className="truncate">{row.model}</span>
+                  <span className="ml-auto shrink-0">
+                    {timeAgo(row.lastMessageAt ?? row.updatedAt)}
+                  </span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+
+        <div className="border-t border-line px-3 py-[7px]">
+          <Link
+            href="/intelligence/models"
+            className="mono flex items-center gap-[6px] text-[11px] text-[var(--text-faint)] transition-colors hover:text-[var(--accent)]"
+          >
+            <Layers size={11} /> models
+          </Link>
+        </div>
+      </aside>
+
+      <main className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-9 shrink-0 items-center gap-3 border-b border-line px-4">
+          <Telescope size={13} className="text-[var(--text-faint)]" />
+          <h1 className="truncate text-[12.5px] font-medium">
+            {console_.conversation?.title ?? 'Developer Intelligence'}
+          </h1>
+
+          {console_.conversation && (
+            <>
+              <button
+                onClick={() => void console_.update({ isPinned: !console_.conversation?.isPinned })}
+                title={console_.conversation.isPinned ? 'Unpin' : 'Pin'}
+                className={cx(
+                  'shrink-0 transition-colors',
+                  console_.conversation.isPinned
+                    ? 'text-[var(--accent)]'
+                    : 'text-[var(--text-faint)] hover:text-[var(--accent)]',
+                )}
+              >
+                <Pin size={12} />
+              </button>
+              <button
+                onClick={() =>
+                  void console_.update({ isArchived: !console_.conversation?.isArchived })
+                }
+                title={console_.conversation.isArchived ? 'Unarchive' : 'Archive'}
+                className="shrink-0 text-[var(--text-faint)] transition-colors hover:text-[var(--text-muted)]"
+              >
+                <Archive size={12} />
+              </button>
+              <button
+                onClick={async () => {
+                  if (!window.confirm('Delete this conversation? The transcript goes with it.'))
+                    return;
+                  await api(`/ai/conversations/${console_.conversation?.id}`, {
+                    method: 'DELETE',
+                  }).catch(() => undefined);
+                  setActiveId(null);
+                  await loadConversations();
+                }}
+                title="Delete"
+                className="shrink-0 text-[var(--text-faint)] transition-colors hover:text-[var(--danger)]"
+              >
+                <Trash2 size={12} />
+              </button>
+            </>
+          )}
+
+          <div className="ml-auto flex shrink-0 items-center gap-3">
+            {providers?.settings.privateMode && (
+              <span
+                className="mono flex items-center gap-[5px] text-[10.5px] text-[var(--security)]"
+                title="All processing runs through your own Ollama. No external AI provider is called."
+              >
+                <Lock size={10} /> private
+              </span>
+            )}
+            <StatusIndicator
+              signal={
+                status?.state === 'ONLINE'
+                  ? 'success'
+                  : status?.state === 'ERROR'
+                    ? 'danger'
+                    : 'neutral'
+              }
+              label={
+                status?.state === 'ONLINE'
+                  ? `Ollama ${status.placement.toLowerCase()}`
+                  : 'Ollama offline'
+              }
+              pulse={status?.state === 'ONLINE'}
+            />
+            <Link
+              href="/settings/intelligence"
+              title="AI settings"
+              className="text-[var(--text-faint)] transition-colors hover:text-[var(--accent)]"
+            >
+              <Settings2 size={13} />
+            </Link>
+          </div>
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {status && status.state !== 'ONLINE' && <EngineBanner status={status} />}
+
+          {console_.loading ? (
+            <LoadingLine message="Loading the conversation…" />
+          ) : console_.messages.length === 0 && !console_.pending ? (
+            <Welcome
+              conversations={conversations}
+              models={models}
+              onPick={setActiveId}
+              onNew={() => void startConversation()}
+            />
+          ) : (
+            <Transcript
+              messages={console_.messages}
+              pending={console_.pending}
+              error={console_.error}
+              hasMore={console_.hasMore}
+              projectId={console_.conversation?.projectId ?? null}
+              onLoadOlder={() => void console_.loadOlder()}
+              onRegenerate={(message) => {
+                const question = [...console_.messages]
+                  .reverse()
+                  .find((row) => row.role === 'USER' && row.createdAt < message.createdAt);
+                if (question) void console_.send(question.content, { regenerate: true });
+              }}
+              onRetry={() => console_.dismissError()}
+              onAsk={(question) => void send(question)}
+            />
+          )}
+        </div>
+
+        <Composer
+          conversation={console_.conversation}
+          models={models}
+          modes={modes}
+          streaming={console_.streaming}
+          attachments={attachments}
+          onSend={(text) => void send(text)}
+          onStop={console_.stop}
+          onCommand={(command, argument) => void runCommand(command, argument)}
+          onDetach={(ref) =>
+            void console_.update({
+              attached: (console_.conversation?.attached ?? []).filter((item) => item !== ref),
+            })
+          }
+          onAttach={() => setAttaching(true)}
+        />
+      </main>
+
+      {attaching && (
+        <AttachPicker
+          attached={console_.conversation?.attached ?? []}
+          onAttach={async (ref) => {
+            // Attaching before a conversation exists would have nowhere to go,
+            // so the conversation is created first and then updated.
+            const target = console_.conversation ?? (await startConversation());
+            if (!target) return;
+            await console_.update({ attached: [...(target.attached ?? []), ref] });
+          }}
+          onClose={() => setAttaching(false)}
+        />
+      )}
+
+      {switching && (
+        <ModelSwitcher
+          models={models}
+          current={console_.conversation?.model ?? null}
+          onPick={(model) => void console_.update({ model })}
+          onClose={() => setSwitching(false)}
+        />
+      )}
+    </div>
   );
 }
 
-/* ── the context panel ────────────────────────────────────────────────────── */
-
-function IndexPanel({
-  status,
-  history,
-  onRun,
-  onRebuilt,
+/**
+ * The empty console (§66).
+ *
+ * Not a marketing panel and not "No data found" — it says what this screen is
+ * for, shows what is loaded, and puts recent work one click away.
+ */
+function Welcome({
+  conversations,
+  models,
+  onPick,
+  onNew,
 }: {
-  status: Status | null;
-  history: string[];
-  onRun: (question: string) => void;
-  onRebuilt: () => Promise<void>;
+  conversations: Conversation[];
+  models: OllamaModel[];
+  onPick: (id: string) => void;
+  onNew: () => void;
 }) {
-  const rebuild = useAction(() => api('/ai/reindex', { method: 'POST', body: {} }));
-
   return (
-    <div className="flex flex-col gap-4 p-4">
-      <PanelSection title="Indexed">
-        {/* Three states, not two: not knowing yet is different from knowing
-            there is nothing, and saying the wrong one is a small lie. */}
-        {!status ? (
-          <p className="text-[12px] text-[var(--text-faint)]">Reading the index…</p>
-        ) : status.index.byType.length > 0 ? (
-          <ul className="flex flex-col gap-[3px]">
-            {status.index.byType.map((row) => (
-              <li key={row.entityType} className="flex items-baseline gap-2 text-[12px]">
-                <span className="min-w-0 flex-1 truncate text-[var(--text-muted)]">
-                  {humanise(row.entityType)}
-                </span>
-                <span className="mono text-[11px] text-[var(--text-faint)]">{row.records}</span>
+    <div className="mx-auto flex max-w-[620px] flex-col gap-6 px-6 py-12">
+      <div>
+        <h2 className="mb-1 text-[15px] font-semibold tracking-[-0.01em]">
+          What are you working on?
+        </h2>
+        <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
+          Your own notes, solutions, decisions and infrastructure are available when the answer
+          needs them. Every claim drawn from them names the record it came from.
+        </p>
+      </div>
+
+      <div className="mono flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[var(--text-faint)]">
+        <span className="flex items-center gap-[5px]">
+          <Cpu size={11} /> {models.length} model{models.length === 1 ? '' : 's'} installed
+        </span>
+        <span className="flex items-center gap-[5px]">
+          <Lock size={11} /> nothing leaves this machine
+        </span>
+      </div>
+
+      {conversations.length > 0 && (
+        <section>
+          <div className="label mb-2">Recent</div>
+          <ul className="overflow-hidden rounded border border-line bg-[var(--surface-raised)]">
+            {conversations.slice(0, 5).map((row) => (
+              <li key={row.id}>
+                <button
+                  onClick={() => onPick(row.id)}
+                  className="flex w-full items-center gap-3 border-b border-line px-3 py-[7px] text-left transition-colors last:border-b-0 hover:bg-[var(--surface-hover)]"
+                >
+                  <span className="min-w-0 flex-1 truncate text-[12.5px]">{row.title}</span>
+                  <span className="mono shrink-0 text-[10.5px] text-[var(--text-faint)]">
+                    {timeAgo(row.lastMessageAt ?? row.updatedAt)}
+                  </span>
+                </button>
               </li>
             ))}
           </ul>
-        ) : (
-          <p className="text-[12px] text-[var(--text-muted)]">
-            Nothing indexed yet. Rebuild to read everything you have written so far.
-          </p>
-        )}
-      </PanelSection>
-
-      <PanelSection title="Rebuild">
-        <p className="mb-2 text-[11.5px] leading-relaxed text-[var(--text-faint)]">
-          Records are indexed as you save them. A rebuild is only needed after changing the
-          embedding provider, or to pick up documents uploaded before this was switched on.
-        </p>
-        <Button
-          onClick={async () => {
-            await rebuild.run();
-            await onRebuilt();
-          }}
-          disabled={rebuild.busy}
-        >
-          <RefreshCw size={12} className={cx(rebuild.busy && 'animate-spin')} />
-          {rebuild.busy ? 'Reading…' : 'Rebuild index'}
-        </Button>
-        {status?.index.lastIndexedAt && (
-          <p className="mono mt-2 text-[10.5px] text-[var(--text-faint)]">
-            last written {timeAgo(status.index.lastIndexedAt)}
-          </p>
-        )}
-      </PanelSection>
-
-      {history.length > 0 && (
-        <>
-          <PanelDivider />
-          <PanelSection title="This session">
-            <ul className="flex flex-col gap-[2px]">
-              {history.map((item) => (
-                <li key={item}>
-                  <button
-                    onClick={() => onRun(item)}
-                    className="w-full truncate text-left text-[12px] text-[var(--text-muted)] hover:text-[var(--accent)]"
-                    title={item}
-                  >
-                    {item}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </PanelSection>
-        </>
+        </section>
       )}
+
+      <div className="flex items-center gap-3">
+        <Button variant="primary" onClick={onNew}>
+          <MessageSquarePlus size={13} /> New conversation
+        </Button>
+        <span className="mono flex items-center gap-2 text-[10.5px] text-[var(--text-faint)]">
+          or just type below <KeyHint keys={['↵']} />
+        </span>
+      </div>
     </div>
   );
 }

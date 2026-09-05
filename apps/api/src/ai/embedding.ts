@@ -174,6 +174,65 @@ export function openAiEmbedder(apiKey: string, model: string): Embedder {
   };
 }
 
+/* ── the local provider, for meaning ─────────────────────────────────── */
+
+/**
+ * Ollama's embedding endpoint (§20).
+ *
+ * The chat model is not used for this. An embedding model is a different thing
+ * trained for a different job, which is why it is configured separately — and
+ * why a missing one has to be reported rather than substituted.
+ *
+ * Ollama has no `dimensions` parameter, so a model that emits 768 numbers is
+ * cut to DIMENSIONS and re-normalised. That is sound for the Matryoshka models
+ * this is aimed at — nomic-embed-text is trained so a truncated prefix stays
+ * meaningful — and merely lossy for the rest, which is the honest trade
+ * against a migration that would widen the column for every provider at once.
+ * A model narrower than DIMENSIONS is refused instead of padded: zeros are not
+ * a vector, and the silence would look like poor recall rather than a mistake.
+ */
+export function ollamaEmbedder(baseUrl: string, model: string): Embedder {
+  return {
+    model: `${model}@${DIMENSIONS}`,
+    kind: 'semantic',
+    async embed(texts) {
+      const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/embed`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model, input: texts }),
+        // Embedding a backlog is slower than answering one question, and the
+        // first call also pays for loading the model off disk.
+        signal: AbortSignal.timeout(180_000),
+      });
+
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw new Error(
+          detail.includes('not found')
+            ? `The embedding model ${model} is not installed. Run: ollama pull ${model}`
+            : `Ollama returned ${response.status} while embedding.`,
+        );
+      }
+
+      const body = (await response.json()) as { embeddings?: number[][] };
+      const vectors = body.embeddings ?? [];
+      if (vectors.length !== texts.length) {
+        throw new Error(`${model} returned ${vectors.length} vectors for ${texts.length} inputs.`);
+      }
+      return vectors.map((vector) => fit(vector, model));
+    },
+  };
+}
+
+function fit(vector: number[], model: string): number[] {
+  if (vector.length < DIMENSIONS) {
+    throw new Error(
+      `${model} produces ${vector.length}-wide vectors, and this index needs ${DIMENSIONS}. Choose a wider embedding model, such as nomic-embed-text.`,
+    );
+  }
+  return vector.length === DIMENSIONS ? normalise(vector) : normalise(vector.slice(0, DIMENSIONS));
+}
+
 /** pgvector's own literal syntax. Prisma has no type for it, so we format it. */
 export function toVectorLiteral(vector: number[]): string {
   return `[${vector.map((value) => value.toFixed(6)).join(',')}]`;

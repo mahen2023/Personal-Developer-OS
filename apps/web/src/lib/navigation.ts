@@ -9,6 +9,7 @@ import {
   ChevronsLeftRight,
   CircuitBoard,
   Cloud,
+  Cpu,
   Database,
   FileText,
   FolderGit2,
@@ -159,7 +160,12 @@ export const NAVIGATION: NavSection[] = [
     label: 'Intelligence',
     // Not "AI Assistant", and not a robot icon (§76). What it does is look
     // through records you already have, so it is named and drawn for that.
-    items: [{ label: 'Console', href: '/intelligence', icon: Telescope, chord: 'a' }],
+    items: [
+      { label: 'Console', href: '/intelligence', icon: Telescope, chord: 'a' },
+      { label: 'Local Models', href: '/intelligence/models', icon: Cpu, chord: 'm' },
+      // Retrieval without a model: still works with Ollama stopped (§46).
+      { label: 'Retrieval', href: '/intelligence/retrieval', icon: Search },
+    ],
   },
   {
     label: 'System',
@@ -168,6 +174,7 @@ export const NAVIGATION: NavSection[] = [
       { label: 'Activity', href: '/activity', icon: Activity },
       { label: 'Settings', href: '/settings', icon: Settings },
       { label: 'Automation', href: '/settings/automation', icon: RefreshCw },
+      { label: 'Local AI', href: '/settings/intelligence', icon: Sparkles },
       { label: 'Integrations', href: '/settings/integrations', icon: Plug },
       { label: 'Security', href: '/settings/security', icon: ShieldCheck },
       { label: 'Diagnostics', href: '/settings/diagnostics', icon: Archive },

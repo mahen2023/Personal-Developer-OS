@@ -19,8 +19,31 @@ Check it came up:
 
 ```bash
 docker compose ps
-curl -s localhost:4000/api/ready | jq
+curl -s localhost:4002/api/ready | jq
 ```
+
+The stack publishes 3002 (web) and 4002 (API), leaving 3000 and 4000 free for
+`npm run dev` on the same machine. Inside the compose network the services still
+listen on 3000 and 4000 and address each other by name.
+
+## Local AI
+
+The Developer Intelligence console talks to Ollama, which is deliberately not a
+compose service: it wants the host's GPU, and running it in a container beside
+the app would give it neither. The API container reaches the host through
+`host.docker.internal`, which compose maps on Linux too via `extra_hosts`.
+
+```bash
+OLLAMA_BASE_URL=http://host.docker.internal:11434   # the default under compose
+OLLAMA_BASE_URL=http://192.168.1.20:11434           # Ollama on another machine
+```
+
+Ollama binds to loopback by default. To reach it from a container or another
+host, start it with `OLLAMA_HOST=0.0.0.0` — and put it behind the same firewall
+as everything else, because Ollama has no authentication of its own.
+
+If nothing answers there, the console says so and the rest of the application
+carries on: search, retrieval and every other module work with no model at all.
 
 ## Behind a reverse proxy
 
@@ -35,7 +58,11 @@ server {
   ssl_certificate_key /etc/letsencrypt/live/devos.example.com/privkey.pem;
 
   location / {
-    proxy_pass http://127.0.0.1:3000;
+    proxy_pass http://127.0.0.1:3002;
+    # The console streams answers token by token. Without this nginx holds the
+    # response until it has a buffer's worth, and a working console looks frozen.
+    proxy_buffering off;
+    proxy_read_timeout 300s;
     proxy_set_header Host              $host;
     proxy_set_header X-Real-IP         $remote_addr;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -45,7 +72,7 @@ server {
 ```
 
 Only the web service needs to be reachable. The API is called through the Next
-proxy, so port 4000 can stay bound to localhost or the compose network.
+proxy, so port 4002 can stay bound to localhost or the compose network.
 
 Then in `.env`:
 

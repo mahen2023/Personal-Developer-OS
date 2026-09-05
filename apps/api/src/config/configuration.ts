@@ -109,6 +109,20 @@ export function configuration() {
       embeddingModel: process.env.EMBEDDING_MODEL ?? 'text-embedding-3-small',
       embeddingKey: process.env.OPENAI_API_KEY ?? '',
     },
+
+    // The local assistant. Nothing here reaches the internet, which is why it
+    // has no key and no enable flag: if Ollama answers, the console works.
+    ollama: {
+      // Not a constant. Ollama is frequently on another box, and from inside a
+      // container `localhost` is the container itself — see docs/DEPLOYMENT.md.
+      baseUrl: (process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434').replace(/\/+$/, ''),
+      // Deliberately empty by default. Which models exist is discovered from
+      // the server; naming one here would be a guess about someone's disk.
+      chatModel: process.env.OLLAMA_CHAT_MODEL ?? '',
+      embeddingModel: process.env.OLLAMA_EMBEDDING_MODEL ?? 'nomic-embed-text',
+      // A slow first token is normal: a cold model is read off disk first.
+      timeoutMs: int('OLLAMA_TIMEOUT_MS', 120_000),
+    },
   };
 }
 

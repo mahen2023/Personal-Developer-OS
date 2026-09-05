@@ -9,6 +9,15 @@ x-api-base: &api-base
     DATABASE_URL: postgresql://${POSTGRES_USER:-devos}:${POSTGRES_PASSWORD:-devos}@postgres:5432/${POSTGRES_DB:-devos}?schema=public
     REDIS_URL: redis://redis:6379
     STORAGE_LOCAL_PATH: /app/storage
+    # Pinned, because `.env` is this container's env_file and the API reads
+    # API_PORT to choose what to listen on. That variable is the port
+    # `npm run dev` takes on the host; letting it through here would move the
+    # listener out from under the published mapping below.
+    API_PORT: 4000
+    # Inside a container `localhost` is the container. The developer's Ollama
+    # is on the host, so the default points at the host gateway; override
+    # OLLAMA_BASE_URL in .env for an Ollama on another machine entirely.
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
   volumes:
     - storage:/app/storage
   depends_on:
@@ -48,11 +57,17 @@ services:
   api:
     <<: *api-base
     command: ['node', 'dist/main.js']
-    ports: ['${API_PORT:-4000}:4000']
+    # Linux has no host.docker.internal by default; this makes the name resolve
+    # there too, so one compose file works on all three platforms.
+    extra_hosts: ['host.docker.internal:host-gateway']
+    # 4002 and 3002, not 4000 and 3000: the stack is meant to run beside
+    # `npm run dev`, and two things cannot hold the same port.
+    ports: ['4002:4000']
 
   worker:
     <<: *api-base
     command: ['node', 'dist/worker.js']
+    extra_hosts: ['host.docker.internal:host-gateway']
 
   web:
     build:
@@ -60,8 +75,7 @@ services:
       dockerfile: apps/web/Dockerfile
     environment:
       API_INTERNAL_URL: http://api:4000
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
-    ports: ['${WEB_PORT:-3000}:3000']
+    ports: ['3002:3000']
     depends_on: [api]
     restart: unless-stopped
 

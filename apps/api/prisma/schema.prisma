@@ -303,6 +303,11 @@ model User {
   chunks        Chunk[]
   integrations  Integration[]
 
+  aiConversations AiConversation[]
+  aiProfiles      AiModelProfile[]
+  aiSettings      AiSetting?
+  aiUsage         AiUsage[]
+
   @@map("users")
 }
 
@@ -370,6 +375,7 @@ model Project {
   vaultItems    VaultItem[]
   activities    Activity[]
   chunks        Chunk[]
+  conversations AiConversation[]
 
   @@unique([userId, slug])
   @@index([userId, status])
@@ -792,24 +798,24 @@ model Meeting {
 // ────────────────────────────────────────────────────────── knowledge ────────
 
 model Document {
-  id           String     @id @default(uuid()) @db.Uuid
-  userId       String     @db.Uuid
-  projectId    String?    @db.Uuid
-  fileName     String
-  originalName String
-  mimeType     String
-  sizeBytes    Int
-  storageKey   String
-  checksum     String?
-  ownerType    EntityType @default(PROJECT)
-  ownerId      String?    @db.Uuid
+  id            String     @id @default(uuid()) @db.Uuid
+  userId        String     @db.Uuid
+  projectId     String?    @db.Uuid
+  fileName      String
+  originalName  String
+  mimeType      String
+  sizeBytes     Int
+  storageKey    String
+  checksum      String?
+  ownerType     EntityType @default(PROJECT)
+  ownerId       String?    @db.Uuid
   /// Plain text pulled out of the file, kept so a re-index does not have to
   /// re-parse a 40 MB PDF.
   extractedText String?
-  extractedAt  DateTime?
-  indexedAt    DateTime?
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  extractedAt   DateTime?
+  indexedAt     DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
 
   user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
@@ -1015,20 +1021,20 @@ model Activity {
 }
 
 model Notification {
-  id         String           @id @default(uuid()) @db.Uuid
-  userId     String           @db.Uuid
-  kind       NotificationKind
-  severity   Severity         @default(INFO)
-  title      String
-  body       String?
-  entityType EntityType?
-  entityId   String?          @db.Uuid
-  dueAt      DateTime?
-  readAt     DateTime?
+  id          String           @id @default(uuid()) @db.Uuid
+  userId      String           @db.Uuid
+  kind        NotificationKind
+  severity    Severity         @default(INFO)
+  title       String
+  body        String?
+  entityType  EntityType?
+  entityId    String?          @db.Uuid
+  dueAt       DateTime?
+  readAt      DateTime?
   dismissedAt DateTime?
   /// Stops the daily expiry scan from re-creating the same notification.
-  dedupeKey  String
-  createdAt  DateTime         @default(now())
+  dedupeKey   String
+  createdAt   DateTime         @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1040,22 +1046,20 @@ model Notification {
 
 /**
  * One embedded slice of something you wrote (§35).
- *
  * Chunks are derived data: every row can be rebuilt from the record it came
  * from, which is why re-indexing is safe and why nothing here is backed up
  * separately. `entityType` + `entityId` point back at the source so an answer
  * can always cite the record rather than paraphrasing it into the void.
- *
  * The vector column is 384 dimensions for both supported providers — the local
  * one produces that natively, and OpenAI's v3 models are asked to reduce to it.
  * Changing the dimension means a migration and a full re-index.
  */
 model Chunk {
-  id         String     @id @default(uuid()) @db.Uuid
-  userId     String     @db.Uuid
+  id         String                     @id @default(uuid()) @db.Uuid
+  userId     String                     @db.Uuid
   entityType EntityType
-  entityId   String     @db.Uuid
-  projectId  String?    @db.Uuid
+  entityId   String                     @db.Uuid
+  projectId  String?                    @db.Uuid
   /// Position within the source, so neighbouring chunks can be stitched back.
   ordinal    Int
   /// A short human label for the source, so a citation needs no second query.
@@ -1064,7 +1068,7 @@ model Chunk {
   /// Which embedding model produced the vector, so a provider switch is visible.
   model      String
   embedding  Unsupported("vector(384)")
-  createdAt  DateTime   @default(now())
+  createdAt  DateTime                   @default(now())
 
   user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
@@ -1078,7 +1082,6 @@ model Chunk {
 
 /**
  * A connection to an outside service (§8 of the phase list).
- *
  * The token is encrypted at rest with the same envelope key the vault uses,
  * but — unlike a vault item — the server can decrypt it on its own. It has to:
  * the nightly sync runs while nobody is logged in, so a credential locked
@@ -1128,4 +1131,169 @@ model AuditLog {
   @@index([userId, createdAt])
   @@index([action, createdAt])
   @@map("audit_logs")
+}
+
+// ────────────────────────────────────────────────── developer intelligence ──
+
+/// Who said it. TOOL exists so a retrieval or action step can be recorded in
+/// the transcript as its own turn rather than being smuggled into a prompt.
+enum AiRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+/// What the assistant is being asked to be. These are prompt and retrieval
+/// strategies, not different models — see ai/chat/modes.ts.
+enum AiMode {
+  GENERAL
+  PROJECT
+  TROUBLESHOOTING
+  DOCUMENTATION
+  CODE
+  INFRASTRUCTURE
+  KNOWLEDGE
+}
+
+/// Only one member today. It exists so a conversation records which engine
+/// produced it, and so adding a second provider is a migration rather than a
+/// redesign.
+enum AiProviderKind {
+  OLLAMA
+}
+
+enum AiRequestStatus {
+  OK
+  ERROR
+  CANCELLED
+}
+
+/// One chat. The model lives on the conversation rather than being fixed at
+/// creation, so switching mid-thread is a field update and the history stays.
+model AiConversation {
+  id         String         @id @default(uuid()) @db.Uuid
+  userId     String         @db.Uuid
+  projectId  String?        @db.Uuid
+  title      String         @default("New conversation")
+  mode       AiMode         @default(GENERAL)
+  provider   AiProviderKind @default(OLLAMA)
+  model      String
+  /// Which record types retrieval may draw on, as EntityType names. Empty
+  /// means "no retrieval" — an explicit choice, not a missing default.
+  sources    String[]       @default([])
+  /// Records the user pinned to this conversation, as EntityType:id pairs.
+  /// Always sent, unlike retrieved passages, which are chosen per question.
+  attached   String[]       @default([])
+  isPinned   Boolean        @default(false)
+  isArchived Boolean        @default(false)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project  Project?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  messages AiMessage[]
+  usage    AiUsage[]
+
+  @@index([userId, updatedAt])
+  @@index([userId, isArchived, updatedAt])
+  @@index([projectId])
+  @@map("ai_conversations")
+}
+
+/// One turn.
+///
+/// `sources` is a snapshot of what the model was shown, not a relation. A
+/// citation has to keep saying what it said even after the note it quoted is
+/// edited or deleted — a foreign key would either dangle or cascade the
+/// transcript away, and both rewrite history.
+model AiMessage {
+  id               String   @id @default(uuid()) @db.Uuid
+  conversationId   String   @db.Uuid
+  role             AiRole
+  content          String   @default("")
+  /// Null for a user turn: nothing generated it.
+  model            String?
+  sources          Json     @default("[]")
+  /// Milliseconds from request to last token.
+  durationMs       Int?
+  promptTokens     Int?
+  completionTokens Int?
+  createdAt        DateTime @default(now())
+
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("ai_messages")
+}
+
+/// A saved set of model parameters. Named so it can be chosen in one keystroke.
+model AiModelProfile {
+  id            String         @id @default(uuid()) @db.Uuid
+  userId        String         @db.Uuid
+  name          String
+  provider      AiProviderKind @default(OLLAMA)
+  model         String
+  mode          AiMode         @default(GENERAL)
+  temperature   Float?
+  topP          Float?
+  topK          Int?
+  contextLength Int?
+  systemPrompt  String?
+  isDefault     Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("ai_model_profiles")
+}
+
+/// One row per user. Null means "follow the environment", so a setting the
+/// user never touched keeps tracking the deployment's default.
+model AiSetting {
+  userId         String         @id @db.Uuid
+  provider       AiProviderKind @default(OLLAMA)
+  baseUrl        String?
+  chatModel      String?
+  embeddingModel String?
+  defaultMode    AiMode         @default(GENERAL)
+  temperature    Float?
+  /// Local processing only. On by default, and the console says so on screen.
+  privateMode    Boolean        @default(true)
+  /// Off keeps transcripts out of the database entirely (§31).
+  retainMessages Boolean        @default(true)
+  updatedAt      DateTime       @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("ai_settings")
+}
+
+/// Every generation attempt, including the ones that failed — which is the
+/// point. A failure leaves no message row, so without this it leaves no trace.
+model AiUsage {
+  id               String          @id @default(uuid()) @db.Uuid
+  userId           String          @db.Uuid
+  conversationId   String?         @db.Uuid
+  messageId        String?         @db.Uuid
+  provider         AiProviderKind  @default(OLLAMA)
+  model            String
+  status           AiRequestStatus @default(OK)
+  /// The failure as shown to the user. Never a request body — see redact().
+  error            String?
+  startedAt        DateTime        @default(now())
+  completedAt      DateTime?
+  durationMs       Int?
+  promptTokens     Int?
+  completionTokens Int?
+
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation AiConversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([userId, startedAt])
+  @@index([conversationId])
+  @@map("ai_usage")
 }

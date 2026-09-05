@@ -1,6 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DIMENSIONS, type Embedder, localEmbedder, openAiEmbedder } from './embedding';
+import {
+  DIMENSIONS,
+  type Embedder,
+  localEmbedder,
+  ollamaEmbedder,
+  openAiEmbedder,
+} from './embedding';
 
 /** Enough per request to be efficient, small enough not to trip a body limit. */
 const BATCH = 64;
@@ -16,6 +22,15 @@ export class EmbeddingService {
 
     if (name === 'openai' && key) {
       this.provider = openAiEmbedder(key, config.get<string>('ai.embeddingModel') ?? '');
+    } else if (name === 'ollama') {
+      // No key to check, so nothing to fall back over at boot: whether the
+      // model is installed is only knowable by asking, and asking here would
+      // block startup on a machine where Ollama is not running yet. The first
+      // embed says so plainly instead.
+      this.provider = ollamaEmbedder(
+        config.get<string>('ollama.baseUrl') ?? 'http://localhost:11434',
+        config.get<string>('ollama.embeddingModel') ?? 'nomic-embed-text',
+      );
     } else {
       if (name === 'openai') {
         this.logger.warn('EMBEDDING_PROVIDER is openai but OPENAI_API_KEY is empty — using local.');
