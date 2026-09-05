@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "comment": "The Nest CLI builds with this file. prisma/seed.ts is excluded so it does not widen rootDir and push the output to dist/src — it runs through tsx and is still type-checked by the root tsconfig.",
+  "exclude": ["node_modules", "dist", "prisma", "**/*.spec.ts"]
+}

@@ -1,0 +1,590 @@
+@import 'tailwindcss';
+
+/* ============================================================================
+   Personal Developer OS — design tokens
+
+   The visual language is "instrument panel", not "web dashboard":
+     · surfaces are separated by 1px hairlines, never by shadow or rounding
+     · one brass accent carries interaction; colour otherwise means a signal
+     · radii top out at 6px, so nothing reads as a floating card
+     · monospace is reserved for machine-readable values (IPs, keys, commands)
+
+   Palette is defined once per theme below; every component consumes the
+   semantic name, never a hex.
+   ========================================================================= */
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces, deepest to highest */
+  --surface-sunken: #07090b;
+  --surface-base: #0b0e12;
+  --surface-raised: #11151b;
+  --surface-overlay: #171c24;
+  --surface-hover: rgb(255 255 255 / 0.035);
+  --surface-active: rgb(255 255 255 / 0.07);
+
+  /* structure */
+  --line: #1c222a;
+  --line-strong: #2a323d;
+
+  /* type */
+  --text: #dde3ea;
+  --text-muted: #8b96a5;
+  --text-faint: #59636f;
+  --text-inverse: #0b0e12;
+
+  /* interaction — brass, chosen to read as an instrument highlight rather
+     than a brand colour, and to stay clear of the purple "AI" cliché */
+  --accent: #e0a458;
+  --accent-hover: #eeb771;
+  --accent-dim: rgb(224 164 88 / 0.14);
+  --accent-line: rgb(224 164 88 / 0.4);
+
+  /* signals */
+  --success: #4fa85f;
+  --success-dim: rgb(79 168 95 / 0.14);
+  --warning: #d6a02b;
+  --warning-dim: rgb(214 160 43 / 0.14);
+  --danger: #e05252;
+  --danger-dim: rgb(224 82 82 / 0.14);
+  --info: #5b93d6;
+  --info-dim: rgb(91 147 214 / 0.14);
+  --security: #7fb7c4;
+  --security-dim: rgb(127 183 196 / 0.14);
+
+  /* shape + depth */
+  --r-sm: 3px;
+  --r: 5px;
+  --r-lg: 6px;
+  --shadow-overlay: 0 16px 48px -12px rgb(0 0 0 / 0.7), 0 0 0 1px var(--line-strong);
+
+  /* motion */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --fast: 110ms;
+  --base: 170ms;
+  --slow: 260ms;
+
+  /* fixed chrome dimensions, shared by layout and scroll offsets */
+  --topbar-h: 44px;
+  --statusbar-h: 26px;
+  --rail-w: 244px;
+  --rail-w-collapsed: 56px;
+  --context-w: 320px;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --surface-sunken: #eeeeea;
+  --surface-base: #f6f6f3;
+  --surface-raised: #ffffff;
+  --surface-overlay: #ffffff;
+  --surface-hover: rgb(0 0 0 / 0.035);
+  --surface-active: rgb(0 0 0 / 0.06);
+
+  --line: #e3e3dd;
+  --line-strong: #cdcdc5;
+
+  --text: #16191d;
+  --text-muted: #5b636e;
+  --text-faint: #8b939d;
+  --text-inverse: #ffffff;
+
+  --accent: #a86a1c;
+  --accent-hover: #8d5713;
+  --accent-dim: rgb(168 106 28 / 0.1);
+  --accent-line: rgb(168 106 28 / 0.35);
+
+  --success: #2f7d3d;
+  --success-dim: rgb(47 125 61 / 0.1);
+  --warning: #96690a;
+  --warning-dim: rgb(150 105 10 / 0.1);
+  --danger: #bf3535;
+  --danger-dim: rgb(191 53 53 / 0.1);
+  --info: #2f6db5;
+  --info-dim: rgb(47 109 181 / 0.1);
+  --security: #37707f;
+  --security-dim: rgb(55 112 127 / 0.1);
+
+  --shadow-overlay: 0 16px 40px -14px rgb(0 0 0 / 0.28), 0 0 0 1px var(--line-strong);
+}
+
+/* Expose the tokens to Tailwind so utilities stay in the same vocabulary the
+   hand-written CSS uses. */
+@theme inline {
+  --color-sunken: var(--surface-sunken);
+  --color-base: var(--surface-base);
+  --color-raised: var(--surface-raised);
+  --color-overlay: var(--surface-overlay);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --color-security: var(--security);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: var(--font-mono-face), ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace;
+
+  --radius-sm: var(--r-sm);
+  --radius-DEFAULT: var(--r);
+  --radius-lg: var(--r-lg);
+}
+
+/* ── base ─────────────────────────────────────────────────────────────────── */
+
+* {
+  border-color: var(--line);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--surface-base);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings:
+    'cv05' 1,
+    'ss01' 1;
+  overflow: hidden; /* the shell scrolls its own panes, the page never does */
+}
+
+::selection {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+
+/* Thin, self-effacing scrollbars — an IDE detail that matters in dense views */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 9px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+  background-clip: content-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--r-sm);
+}
+
+/* ── typographic roles ────────────────────────────────────────────────────── */
+
+/* Section labels in the rail, panels and tables. Small, tracked, never bold
+   enough to compete with content. */
+.label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* Machine-readable values: IPs, hostnames, commit SHAs, env keys, commands. */
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-ligatures: none;
+  letter-spacing: -0.01em;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── motion ───────────────────────────────────────────────────────────────── */
+
+@keyframes enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 0.55;
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+    opacity: 0;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 0;
+  }
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.anim-enter {
+  animation: enter-up var(--base) var(--ease) both;
+}
+.anim-overlay {
+  animation: overlay-in var(--fast) var(--ease) both;
+}
+.anim-palette {
+  animation: palette-in var(--base) var(--ease) both;
+}
+
+/* Staggered list entrance. Capped at 10 so a 500-row table does not animate
+   for five seconds. */
+.stagger > * {
+  animation: enter-up var(--base) var(--ease) both;
+}
+.stagger > *:nth-child(1) {
+  animation-delay: 0ms;
+}
+.stagger > *:nth-child(2) {
+  animation-delay: 20ms;
+}
+.stagger > *:nth-child(3) {
+  animation-delay: 40ms;
+}
+.stagger > *:nth-child(4) {
+  animation-delay: 60ms;
+}
+.stagger > *:nth-child(5) {
+  animation-delay: 80ms;
+}
+.stagger > *:nth-child(6) {
+  animation-delay: 100ms;
+}
+.stagger > *:nth-child(7) {
+  animation-delay: 120ms;
+}
+.stagger > *:nth-child(8) {
+  animation-delay: 140ms;
+}
+.stagger > *:nth-child(9) {
+  animation-delay: 160ms;
+}
+.stagger > *:nth-child(n + 10) {
+  animation-delay: 180ms;
+}
+
+/* Skeletons: a slow sheen rather than a spinner, so the layout is visible
+   while it loads (§56). */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-hover);
+  border-radius: var(--r-sm);
+}
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--surface-active), transparent);
+  animation: sweep 1.4s var(--ease) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .skeleton::after {
+    display: none;
+  }
+}
+
+/* ============================================================================
+   Markdown and code
+
+   The highlight theme is written against the design tokens rather than
+   imported from highlight.js, so code blocks belong to the same palette as
+   everything else and follow the light/dark switch for free.
+   ========================================================================= */
+
+.md {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-muted);
+}
+
+.md > *:first-child {
+  margin-top: 0;
+}
+.md > *:last-child {
+  margin-bottom: 0;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 1.4em 0 0.5em;
+  line-height: 1.3;
+}
+.md h1 {
+  font-size: 17px;
+}
+.md h2 {
+  font-size: 15px;
+}
+.md h3 {
+  font-size: 13.5px;
+}
+.md h4 {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.md p {
+  margin: 0 0 0.85em;
+}
+
+.md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--accent-line);
+}
+.md a:hover {
+  text-decoration-color: var(--accent);
+}
+
+.md ul,
+.md ol {
+  margin: 0 0 0.85em;
+  padding-left: 1.3em;
+}
+.md ul {
+  list-style: disc;
+}
+.md ol {
+  list-style: decimal;
+}
+.md li {
+  margin: 0.15em 0;
+}
+.md li::marker {
+  color: var(--text-faint);
+}
+
+/* GFM task lists read as checklists, not as bulleted checkboxes */
+.md li:has(> input[type='checkbox']) {
+  list-style: none;
+  margin-left: -1.15em;
+}
+.md input[type='checkbox'] {
+  accent-color: var(--accent);
+  margin-right: 0.5em;
+  vertical-align: -1px;
+}
+
+.md blockquote {
+  border-left: 2px solid var(--accent-line);
+  padding-left: 0.9em;
+  margin: 0 0 0.85em;
+  color: var(--text-faint);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1.4em 0;
+}
+
+.md table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 1em;
+  font-size: 12.5px;
+}
+.md th,
+.md td {
+  border: 1px solid var(--line);
+  padding: 5px 9px;
+  text-align: left;
+}
+.md th {
+  background: var(--surface-sunken);
+  color: var(--text-faint);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.md img {
+  max-width: 100%;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+}
+
+/* Inline code — distinct from a code block, and never mistaken for one */
+.md :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--surface-hover);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 0.5px 4px;
+  color: var(--text);
+}
+
+.md pre {
+  margin: 0 0 1em;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+.md pre code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+/* CodeViewer already draws its own frame */
+.md > pre:only-child {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--surface-base);
+}
+
+/* ── highlight.js token colours, from the semantic palette ─────────────────
+   Restrained on purpose: five hues, not fifteen. Code should read as code,
+   not as a Christmas tree. */
+
+.hljs-comment,
+.hljs-quote {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-meta .hljs-keyword {
+  color: var(--accent);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute {
+  color: var(--success);
+}
+
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-attr,
+.hljs-selector-pseudo {
+  color: var(--info);
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-title.class_,
+.hljs-title.function_ {
+  color: var(--security);
+}
+
+.hljs-type,
+.hljs-built_in,
+.hljs-params,
+.hljs-attr,
+.hljs-property {
+  color: var(--text);
+}
+
+.hljs-deletion {
+  color: var(--danger);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}

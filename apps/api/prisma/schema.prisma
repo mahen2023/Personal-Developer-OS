@@ -1,0 +1,1131 @@
+// Personal Developer OS — data model.
+//
+// Three structural ideas carry the whole app (see docs/ARCHITECTURE.md):
+//   1. Project is the hub. Almost every entity carries an optional projectId,
+//      which is what makes the project workspace and the context graph possible.
+//   2. Cross-cutting concerns (tags, links, activity, notifications, documents)
+//      are polymorphic over EntityType + entityId rather than one join table
+//      per pair. Referential integrity for those is enforced in the service
+//      layer, deliberately, so adding an entity type stays a one-line change.
+//   3. Vault rows never hold plaintext. They hold ciphertext + nonce only.
+
+generator client {
+  provider        = "prisma-client-js"
+  // Lets `prisma migrate` install the Postgres extensions below instead of
+  // requiring a hand-run CREATE EXTENSION on every fresh database.
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgcrypto, pg_trgm, vector]
+}
+
+// ─────────────────────────────────────────────────────────────── enums ──────
+
+enum EntityType {
+  PROJECT
+  REPOSITORY
+  ENVIRONMENT
+  SERVER
+  DATABASE
+  DOMAIN
+  SSL_CERTIFICATE
+  DEPLOYMENT
+  NOTE
+  TASK
+  ISSUE
+  SOLUTION
+  SNIPPET
+  COMMAND
+  ADR
+  MEETING
+  DOCUMENT
+  BOOKMARK
+  LEARNING
+  IDEA
+  VAULT_ITEM
+}
+
+enum ProjectStatus {
+  PLANNED
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  ARCHIVED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  CANCELLED
+}
+
+enum IssueStatus {
+  OPEN
+  INVESTIGATING
+  BLOCKED
+  RESOLVED
+  CLOSED
+}
+
+enum NoteType {
+  GENERAL
+  TECHNICAL
+  MEETING
+  IDEA
+  RESEARCH
+  TROUBLESHOOTING
+  DOCUMENTATION
+  PERSONAL
+}
+
+/// Only the providers this build can actually talk to. A provider is added
+/// here when its client exists, not when its logo does.
+enum IntegrationProvider {
+  GITHUB
+  GITLAB
+  CLOUDFLARE
+}
+
+enum RepoProvider {
+  GITHUB
+  GITLAB
+  BITBUCKET
+  AZURE_DEVOPS
+  OTHER
+}
+
+enum ServerProvider {
+  GCP
+  AWS
+  AZURE
+  DIGITALOCEAN
+  HETZNER
+  LOCAL
+  OTHER
+}
+
+enum ServerStatus {
+  ONLINE
+  OFFLINE
+  DEGRADED
+  UNKNOWN
+  DECOMMISSIONED
+}
+
+enum DatabaseType {
+  POSTGRESQL
+  MONGODB
+  MYSQL
+  REDIS
+  SQLITE
+  OTHER
+}
+
+enum EnvironmentType {
+  DEVELOPMENT
+  STAGING
+  PRODUCTION
+  TESTING
+  LOCAL
+}
+
+enum DeploymentStatus {
+  IN_PROGRESS
+  SUCCESS
+  FAILED
+  ROLLED_BACK
+}
+
+enum AdrStatus {
+  PROPOSED
+  ACCEPTED
+  REJECTED
+  SUPERSEDED
+  DEPRECATED
+}
+
+enum LearningStatus {
+  WANT_TO_LEARN
+  LEARNING
+  COMPLETED
+  PAUSED
+}
+
+enum LearningKind {
+  COURSE
+  ARTICLE
+  BOOK
+  VIDEO
+  DOCUMENTATION
+  OTHER
+}
+
+enum IdeaStatus {
+  IDEA
+  RESEARCHING
+  PLANNED
+  BUILDING
+  COMPLETED
+  DISCARDED
+}
+
+enum BookmarkCategory {
+  DOCUMENTATION
+  TUTORIAL
+  TOOL
+  REFERENCE
+  GITHUB
+  CLOUD
+  AI
+  DATABASE
+  DEVOPS
+  SECURITY
+  OTHER
+}
+
+enum DangerLevel {
+  SAFE
+  CAUTION
+  HIGH
+  DESTRUCTIVE
+}
+
+enum CommandPlatform {
+  LINUX
+  MACOS
+  WINDOWS
+  DOCKER
+  KUBERNETES
+  ANY
+}
+
+enum VaultItemType {
+  PASSWORD
+  API_KEY
+  SSH_KEY
+  TOTP
+  TOKEN
+  CREDENTIAL
+  OTHER
+}
+
+enum NotificationKind {
+  DOMAIN_EXPIRY
+  SSL_EXPIRY
+  TASK_DUE
+  TASK_OVERDUE
+  PROJECT_DEADLINE
+  SECRET_ROTATION
+  BACKUP_REMINDER
+  DEPLOYMENT_FAILED
+  SYSTEM
+}
+
+enum Severity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AuditAction {
+  LOGIN
+  LOGIN_FAILED
+  LOGOUT
+  SESSION_REVOKED
+  PASSWORD_CHANGED
+  VAULT_UNLOCKED
+  VAULT_LOCKED
+  VAULT_MASTER_CHANGED
+  SECRET_CREATED
+  SECRET_VIEWED
+  SECRET_UPDATED
+  SECRET_DELETED
+  SECRET_EXPORTED
+}
+
+// ──────────────────────────────────────────────────── identity & access ─────
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  name         String
+  passwordHash String
+  avatarUrl    String?
+  timezone     String   @default("UTC")
+  settings     Json     @default("{}")
+  isActive     Boolean  @default(true)
+  /// Monotonic counter for ADR numbers. Kept on the user rather than derived
+  /// from max(number) so a deleted record never frees its number — "see
+  /// ADR-004" has to keep meaning the same decision forever.
+  adrSequence  Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions      Session[]
+  vaultProfile  VaultProfile?
+  projects      Project[]
+  repositories  Repository[]
+  environments  Environment[]
+  servers       Server[]
+  databases     DatabaseInstance[]
+  domains       Domain[]
+  certificates  SslCertificate[]
+  deployments   Deployment[]
+  notes         Note[]
+  tasks         Task[]
+  issues        Issue[]
+  solutions     Solution[]
+  snippets      Snippet[]
+  commands      Command[]
+  adrs          Adr[]
+  meetings      Meeting[]
+  documents     Document[]
+  bookmarks     Bookmark[]
+  learningItems LearningItem[]
+  ideas         Idea[]
+  vaultItems    VaultItem[]
+  tags          Tag[]
+  activities    Activity[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+  chunks        Chunk[]
+  integrations  Integration[]
+
+  @@map("users")
+}
+
+/// One row per refresh token. Rotation replaces the row; revocation deletes it,
+/// which is what makes "sign out everywhere" real rather than cosmetic.
+model Session {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique
+  userAgent  String?
+  ip         String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastUsedAt DateTime  @default(now())
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ────────────────────────────────────────────────────────────── projects ─────
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  userId      String        @db.Uuid
+  name        String
+  slug        String
+  description String?
+  status      ProjectStatus @default(PLANNED)
+  priority    Priority      @default(MEDIUM)
+  client      String?
+  color       String?
+  startDate   DateTime?
+  targetDate  DateTime?
+  techStack   String[]      @default([])
+  progress    Int           @default(0)
+  isFavorite  Boolean       @default(false)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  repositories  Repository[]
+  environments  Environment[]
+  servers       Server[]
+  databases     DatabaseInstance[]
+  domains       Domain[]
+  certificates  SslCertificate[]
+  deployments   Deployment[]
+  notes         Note[]
+  tasks         Task[]
+  issues        Issue[]
+  solutions     Solution[]
+  snippets      Snippet[]
+  commands      Command[]
+  adrs          Adr[]
+  meetings      Meeting[]
+  documents     Document[]
+  bookmarks     Bookmark[]
+  learningItems LearningItem[]
+  ideas         Idea[]
+  vaultItems    VaultItem[]
+  activities    Activity[]
+  chunks        Chunk[]
+
+  @@unique([userId, slug])
+  @@index([userId, status])
+  @@index([userId, updatedAt])
+  @@index([targetDate])
+  @@map("projects")
+}
+
+model Repository {
+  id            String       @id @default(uuid()) @db.Uuid
+  userId        String       @db.Uuid
+  projectId     String?      @db.Uuid
+  name          String
+  provider      RepoProvider @default(GITHUB)
+  url           String
+  localPath     String?
+  defaultBranch String       @default("main")
+  language      String?
+  description   String?
+  isPrivate     Boolean      @default(true)
+  lastSyncedAt  DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project     Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  deployments Deployment[]
+
+  @@index([userId])
+  @@index([projectId])
+  @@map("repositories")
+}
+
+model Environment {
+  id        String          @id @default(uuid()) @db.Uuid
+  userId    String          @db.Uuid
+  projectId String?         @db.Uuid
+  name      String
+  type      EnvironmentType @default(DEVELOPMENT)
+  baseUrl   String?
+  notes     String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project      Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  variables    EnvVariable[]
+  servers      Server[]
+  databases    DatabaseInstance[]
+  domains      Domain[]
+  certificates SslCertificate[]
+  deployments  Deployment[]
+
+  @@index([userId])
+  @@index([projectId, type])
+  @@map("environments")
+}
+
+/// A variable is either a literal (non-secret, e.g. LOG_LEVEL=debug) or a
+/// pointer into the vault. Never both, and a secret value never lands here.
+model EnvVariable {
+  id            String   @id @default(uuid()) @db.Uuid
+  environmentId String   @db.Uuid
+  key           String
+  value         String?
+  vaultItemId   String?  @db.Uuid
+  isSecret      Boolean  @default(false)
+  description   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  environment Environment @relation(fields: [environmentId], references: [id], onDelete: Cascade)
+  vaultItem   VaultItem?  @relation(fields: [vaultItemId], references: [id], onDelete: SetNull)
+
+  @@unique([environmentId, key])
+  @@index([vaultItemId])
+  @@map("env_variables")
+}
+
+// ──────────────────────────────────────────────────────── infrastructure ─────
+
+model Server {
+  id            String         @id @default(uuid()) @db.Uuid
+  userId        String         @db.Uuid
+  projectId     String?        @db.Uuid
+  environmentId String?        @db.Uuid
+  name          String
+  provider      ServerProvider @default(OTHER)
+  ipAddress     String?
+  hostname      String?
+  os            String?
+  cpuCores      Int?
+  ramGb         Int?
+  diskGb        Int?
+  region        String?
+  sshUsername   String?
+  sshPort       Int?           @default(22)
+  sshKeyId      String?        @db.Uuid
+  services      String[]       @default([])
+  status        ServerStatus   @default(UNKNOWN)
+  notes         String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project     Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  environment Environment?       @relation(fields: [environmentId], references: [id], onDelete: SetNull)
+  sshKey      VaultItem?         @relation("ServerSshKey", fields: [sshKeyId], references: [id], onDelete: SetNull)
+  databases   DatabaseInstance[]
+  deployments Deployment[]
+
+  @@index([userId, status])
+  @@index([projectId])
+  @@index([environmentId])
+  @@map("servers")
+}
+
+model DatabaseInstance {
+  id             String       @id @default(uuid()) @db.Uuid
+  userId         String       @db.Uuid
+  projectId      String?      @db.Uuid
+  environmentId  String?      @db.Uuid
+  serverId       String?      @db.Uuid
+  name           String
+  type           DatabaseType @default(POSTGRESQL)
+  host           String?
+  port           Int?
+  databaseName   String?
+  username       String?
+  credentialId   String?      @db.Uuid
+  version        String?
+  sizeMb         Int?
+  backupSchedule String?
+  lastBackupAt   DateTime?
+  notes          String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project     Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  environment Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
+  server      Server?      @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  credential  VaultItem?   @relation("DatabaseCredential", fields: [credentialId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([environmentId])
+  @@map("databases")
+}
+
+model Domain {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  projectId     String?   @db.Uuid
+  environmentId String?   @db.Uuid
+  name          String
+  registrar     String?
+  dnsProvider   String?
+  expiresAt     DateTime?
+  autoRenew     Boolean   @default(false)
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project      Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  environment  Environment?     @relation(fields: [environmentId], references: [id], onDelete: SetNull)
+  certificates SslCertificate[]
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([expiresAt])
+  @@map("domains")
+}
+
+model SslCertificate {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  projectId     String?   @db.Uuid
+  environmentId String?   @db.Uuid
+  domainId      String?   @db.Uuid
+  commonName    String
+  issuer        String?
+  issuedAt      DateTime?
+  expiresAt     DateTime
+  autoRenew     Boolean   @default(true)
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project     Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  environment Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
+  domain      Domain?      @relation(fields: [domainId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([domainId])
+  @@map("ssl_certificates")
+}
+
+model Deployment {
+  id            String           @id @default(uuid()) @db.Uuid
+  userId        String           @db.Uuid
+  projectId     String?          @db.Uuid
+  repositoryId  String?          @db.Uuid
+  environmentId String?          @db.Uuid
+  serverId      String?          @db.Uuid
+  version       String?
+  commitSha     String?
+  status        DeploymentStatus @default(IN_PROGRESS)
+  deployedBy    String?
+  deployedAt    DateTime         @default(now())
+  durationSec   Int?
+  notes         String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project     Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  repository  Repository?  @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  environment Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
+  server      Server?      @relation(fields: [serverId], references: [id], onDelete: SetNull)
+
+  @@index([userId, deployedAt])
+  @@index([projectId, deployedAt])
+  @@index([status])
+  @@map("deployments")
+}
+
+// ─────────────────────────────────────────────────────────────── work ────────
+
+model Note {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  projectId String?  @db.Uuid
+  title     String
+  content   String   @default("")
+  type      NoteType @default(GENERAL)
+  isPinned  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, updatedAt])
+  @@index([projectId])
+  @@index([type])
+  @@map("notes")
+}
+
+model Task {
+  id          String     @id @default(uuid()) @db.Uuid
+  userId      String     @db.Uuid
+  projectId   String?    @db.Uuid
+  title       String
+  description String?
+  status      TaskStatus @default(TODO)
+  priority    Priority   @default(MEDIUM)
+  dueDate     DateTime?
+  assignee    String?
+  orderKey    Int        @default(0)
+  meetingId   String?    @db.Uuid
+  completedAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  meeting Meeting? @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([projectId, status])
+  @@index([dueDate])
+  @@map("tasks")
+}
+
+model Issue {
+  id           String      @id @default(uuid()) @db.Uuid
+  userId       String      @db.Uuid
+  projectId    String?     @db.Uuid
+  title        String
+  description  String?
+  errorMessage String?
+  status       IssueStatus @default(OPEN)
+  priority     Priority    @default(MEDIUM)
+  solutionId   String?     @db.Uuid
+  resolvedAt   DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project  Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  solution Solution? @relation(fields: [solutionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([projectId])
+  @@map("issues")
+}
+
+/// The troubleshooting knowledge base — "how did I solve this last time?".
+/// Phase 6 embeds problem + rootCause + solution; the other columns stay
+/// structured so they can be filtered without the LLM.
+model Solution {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @db.Uuid
+  projectId    String?  @db.Uuid
+  repositoryId String?  @db.Uuid
+  title        String
+  problem      String
+  errorMessage String?
+  environment  String?
+  rootCause    String?
+  solution     String
+  commands     String[] @default([])
+  links        String[] @default([])
+  useCount     Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  issues  Issue[]
+
+  @@index([userId, updatedAt])
+  @@index([projectId])
+  @@map("solutions")
+}
+
+model Snippet {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  projectId   String?  @db.Uuid
+  title       String
+  language    String   @default("typescript")
+  code        String
+  description String?
+  useCount    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, updatedAt])
+  @@index([projectId])
+  @@index([language])
+  @@map("snippets")
+}
+
+model Command {
+  id          String          @id @default(uuid()) @db.Uuid
+  userId      String          @db.Uuid
+  projectId   String?         @db.Uuid
+  title       String
+  command     String
+  description String?
+  category    String?
+  platform    CommandPlatform @default(ANY)
+  dangerLevel DangerLevel     @default(SAFE)
+  useCount    Int             @default(0)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([category])
+  @@map("commands")
+}
+
+model Adr {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @db.Uuid
+  projectId    String?   @db.Uuid
+  number       Int
+  title        String
+  status       AdrStatus @default(PROPOSED)
+  context      String
+  decision     String
+  alternatives String?
+  consequences String?
+  supersededBy String?   @db.Uuid
+  decidedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, number])
+  @@index([projectId])
+  @@map("adrs")
+}
+
+model Meeting {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @db.Uuid
+  projectId    String?  @db.Uuid
+  title        String
+  meetingDate  DateTime
+  participants String[] @default([])
+  discussion   String?
+  decisions    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  actionItems Task[]
+
+  @@index([userId, meetingDate])
+  @@index([projectId])
+  @@map("meetings")
+}
+
+// ────────────────────────────────────────────────────────── knowledge ────────
+
+model Document {
+  id           String     @id @default(uuid()) @db.Uuid
+  userId       String     @db.Uuid
+  projectId    String?    @db.Uuid
+  fileName     String
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+  storageKey   String
+  checksum     String?
+  ownerType    EntityType @default(PROJECT)
+  ownerId      String?    @db.Uuid
+  /// Plain text pulled out of the file, kept so a re-index does not have to
+  /// re-parse a 40 MB PDF.
+  extractedText String?
+  extractedAt  DateTime?
+  indexedAt    DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([projectId])
+  @@index([ownerType, ownerId])
+  @@map("documents")
+}
+
+model Bookmark {
+  id          String           @id @default(uuid()) @db.Uuid
+  userId      String           @db.Uuid
+  projectId   String?          @db.Uuid
+  title       String
+  url         String
+  description String?
+  category    BookmarkCategory @default(OTHER)
+  favicon     String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, category])
+  @@index([projectId])
+  @@map("bookmarks")
+}
+
+model LearningItem {
+  id         String         @id @default(uuid()) @db.Uuid
+  userId     String         @db.Uuid
+  projectId  String?        @db.Uuid
+  title      String
+  technology String?
+  kind       LearningKind   @default(COURSE)
+  url        String?
+  status     LearningStatus @default(WANT_TO_LEARN)
+  progress   Int            @default(0)
+  notes      String?
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@map("learning_items")
+}
+
+model Idea {
+  id          String     @id @default(uuid()) @db.Uuid
+  userId      String     @db.Uuid
+  projectId   String?    @db.Uuid
+  title       String
+  description String?
+  category    String?
+  priority    Priority   @default(MEDIUM)
+  status      IdeaStatus @default(IDEA)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@map("ideas")
+}
+
+// ────────────────────────────────────────────────────────────── vault ────────
+
+/// Per-user vault crypto parameters. `verifier` proves a master password is
+/// correct without the server ever seeing the password or the derived key.
+/// `wrappedDataKey` is the vault data key encrypted under the master key.
+model VaultProfile {
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @unique @db.Uuid
+  kdf            String    @default("argon2id")
+  kdfSalt        Bytes
+  kdfMemoryKib   Int       @default(65536)
+  kdfIterations  Int       @default(3)
+  kdfParallelism Int       @default(4)
+  verifier       Bytes
+  wrappedDataKey Bytes
+  wrapNonce      Bytes
+  autoLockMin    Int       @default(15)
+  clipboardSec   Int       @default(20)
+  lastUnlockedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("vault_profiles")
+}
+
+/// `cipher` is AES-256-GCM ciphertext of the secret payload, produced
+/// client-side and re-wrapped server-side with VAULT_ENVELOPE_KEY. Nothing
+/// here is readable without both the master password and the envelope key.
+/// Only non-secret metadata (name, username, url) is stored in the clear, so
+/// items stay searchable while the vault is locked.
+model VaultItem {
+  id            String        @id @default(uuid()) @db.Uuid
+  userId        String        @db.Uuid
+  projectId     String?       @db.Uuid
+  name          String
+  type          VaultItemType @default(PASSWORD)
+  username      String?
+  url           String?
+  notes         String?
+  cipher        Bytes
+  nonce         Bytes
+  alg           String        @default("aes-256-gcm")
+  totpDigits    Int?
+  totpPeriod    Int?
+  rotateEveryD  Int?
+  lastRotatedAt DateTime?
+  lastViewedAt  DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project   Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  envVars   EnvVariable[]
+  sshFor    Server[]           @relation("ServerSshKey")
+  dbCredFor DatabaseInstance[] @relation("DatabaseCredential")
+
+  @@index([userId, type])
+  @@index([projectId])
+  @@map("vault_items")
+}
+
+// ─────────────────────────────────────────────── cross-cutting concerns ──────
+
+model Tag {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  name      String
+  slug      String
+  color     String?
+  createdAt DateTime @default(now())
+
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries EntityTag[]
+
+  @@unique([userId, slug])
+  @@map("tags")
+}
+
+model EntityTag {
+  tagId      String     @db.Uuid
+  entityType EntityType
+  entityId   String     @db.Uuid
+  createdAt  DateTime   @default(now())
+
+  tag Tag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([tagId, entityType, entityId])
+  @@index([entityType, entityId])
+  @@map("entity_tags")
+}
+
+/// Free-form relationships between any two entities (§50). Structural
+/// relationships (project -> server) live as real FKs; this covers the
+/// "this note explains that deployment" links a schema cannot anticipate.
+model EntityLink {
+  id        String     @id @default(uuid()) @db.Uuid
+  userId    String     @db.Uuid
+  fromType  EntityType
+  fromId    String     @db.Uuid
+  toType    EntityType
+  toId      String     @db.Uuid
+  label     String?
+  createdAt DateTime   @default(now())
+
+  @@unique([fromType, fromId, toType, toId])
+  @@index([userId])
+  @@index([toType, toId])
+  @@map("entity_links")
+}
+
+model Activity {
+  id         String      @id @default(uuid()) @db.Uuid
+  userId     String      @db.Uuid
+  projectId  String?     @db.Uuid
+  action     String
+  entityType EntityType?
+  entityId   String?     @db.Uuid
+  summary    String
+  meta       Json        @default("{}")
+  createdAt  DateTime    @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([entityType, entityId])
+  @@map("activities")
+}
+
+model Notification {
+  id         String           @id @default(uuid()) @db.Uuid
+  userId     String           @db.Uuid
+  kind       NotificationKind
+  severity   Severity         @default(INFO)
+  title      String
+  body       String?
+  entityType EntityType?
+  entityId   String?          @db.Uuid
+  dueAt      DateTime?
+  readAt     DateTime?
+  dismissedAt DateTime?
+  /// Stops the daily expiry scan from re-creating the same notification.
+  dedupeKey  String
+  createdAt  DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt])
+  @@index([dueAt])
+  @@map("notifications")
+}
+
+/**
+ * One embedded slice of something you wrote (§35).
+ *
+ * Chunks are derived data: every row can be rebuilt from the record it came
+ * from, which is why re-indexing is safe and why nothing here is backed up
+ * separately. `entityType` + `entityId` point back at the source so an answer
+ * can always cite the record rather than paraphrasing it into the void.
+ *
+ * The vector column is 384 dimensions for both supported providers — the local
+ * one produces that natively, and OpenAI's v3 models are asked to reduce to it.
+ * Changing the dimension means a migration and a full re-index.
+ */
+model Chunk {
+  id         String     @id @default(uuid()) @db.Uuid
+  userId     String     @db.Uuid
+  entityType EntityType
+  entityId   String     @db.Uuid
+  projectId  String?    @db.Uuid
+  /// Position within the source, so neighbouring chunks can be stitched back.
+  ordinal    Int
+  /// A short human label for the source, so a citation needs no second query.
+  title      String
+  content    String
+  /// Which embedding model produced the vector, so a provider switch is visible.
+  model      String
+  embedding  Unsupported("vector(384)")
+  createdAt  DateTime   @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@unique([entityType, entityId, ordinal])
+  @@index([userId])
+  @@index([projectId])
+  @@index([entityType, entityId])
+  @@map("chunks")
+}
+
+/**
+ * A connection to an outside service (§8 of the phase list).
+ *
+ * The token is encrypted at rest with the same envelope key the vault uses,
+ * but — unlike a vault item — the server can decrypt it on its own. It has to:
+ * the nightly sync runs while nobody is logged in, so a credential locked
+ * behind the master password could never be used. That is a real weakening,
+ * and it is the reason integrations are opt-in, one token per provider, and
+ * listed on their own screen where the scopes are visible.
+ */
+model Integration {
+  id         String              @id @default(uuid()) @db.Uuid
+  userId     String              @db.Uuid
+  provider   IntegrationProvider
+  /// Who the token belongs to, as the provider reports it. Never guessed.
+  account    String?
+  /// Sealed with VAULT_ENVELOPE_KEY. Never returned by any endpoint.
+  token      Bytes
+  /// What the provider says the token can do, so the UI need not claim more.
+  scopes     String[]            @default([])
+  isEnabled  Boolean             @default(true)
+  lastSyncAt DateTime?
+  /// The last failure, kept so a silently broken integration is still visible.
+  lastError  String?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@map("integrations")
+}
+
+/// Security-sensitive events only (§67). Never contains a secret value —
+/// `entityId` points at the vault item, `meta` holds non-secret context only.
+model AuditLog {
+  id         String      @id @default(uuid()) @db.Uuid
+  userId     String?     @db.Uuid
+  action     AuditAction
+  entityType EntityType?
+  entityId   String?     @db.Uuid
+  ip         String?
+  userAgent  String?
+  success    Boolean     @default(true)
+  meta       Json        @default("{}")
+  createdAt  DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
