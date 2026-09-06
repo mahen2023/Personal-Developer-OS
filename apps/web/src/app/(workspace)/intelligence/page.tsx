@@ -394,11 +394,21 @@ export default function IntelligenceConsolePage() {
               projectId={console_.conversation?.projectId ?? null}
               onLoadOlder={() => void console_.loadOlder()}
               onRegenerate={(message) => {
-                const question = [...console_.messages]
+                // Anchored to the question, not to the answer: the server
+                // rewinds to that turn and asks again from exactly there.
+                // Found by position rather than by timestamp — the list is
+                // already in order, and comparing dates as strings is a trap
+                // waiting for the day one of them is not an ISO string.
+                const at = console_.messages.findIndex((row) => row.id === message.id);
+                const question = console_.messages
+                  .slice(0, Math.max(at, 0))
                   .reverse()
-                  .find((row) => row.role === 'USER' && row.createdAt < message.createdAt);
-                if (question) void console_.send(question.content, { regenerate: true });
+                  .find((row) => row.role === 'USER');
+                if (question) {
+                  void console_.send(question.content, { fromMessageId: question.id });
+                }
               }}
+              onEdit={(message, text) => void console_.send(text, { fromMessageId: message.id })}
               onRetry={() => console_.dismissError()}
               onAsk={(question) => void send(question)}
             />

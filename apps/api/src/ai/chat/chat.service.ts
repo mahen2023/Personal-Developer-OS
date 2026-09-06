@@ -80,9 +80,9 @@ export class ChatService {
       : null;
     const mode = dto.mode ?? profile?.mode ?? conversation.mode;
 
-    // A regenerate re-asks the previous question, so the failed or unwanted
-    // answer is removed first — leaving it would put two replies in the thread.
-    if (dto.regenerate) await this.dropLastAnswer(conversationId);
+    // Rewinding happens before the history is read, so the turns being replaced
+    // are gone by the time the prompt is built.
+    if (dto.fromMessageId) await this.truncateFrom(conversationId, dto.fromMessageId);
 
     const question = dto.message.trim();
     const history = settings.retainMessages
@@ -301,17 +301,27 @@ export class ChatService {
     });
   }
 
-  /** Removes the trailing assistant turn, and the user turn that prompted it. */
-  private async dropLastAnswer(conversationId: string): Promise<void> {
-    const recent = await this.prisma.aiMessage.findMany({
-      where: { conversationId },
-      orderBy: { createdAt: 'desc' },
-      take: 2,
+  /**
+   * Deletes one message and everything after it.
+   *
+   * Cut by timestamp rather than by counting rows back from the end: the caller
+   * names the turn it means, so regenerating the third answer of six rewinds to
+   * the third and not to the sixth. Counting was the earlier version of this,
+   * and it quietly destroyed the newest exchange while leaving the answer the
+   * developer had actually clicked exactly where it was.
+   *
+   * A message id that is not in this conversation deletes nothing, so a stale
+   * transcript in another tab cannot truncate the wrong thread.
+   */
+  private async truncateFrom(conversationId: string, messageId: string): Promise<void> {
+    const anchor = await this.prisma.aiMessage.findFirst({
+      where: { id: messageId, conversationId },
+      select: { createdAt: true },
     });
-    const ids = recent
-      .filter((row) => row.role === AiRole.ASSISTANT || row.role === AiRole.USER)
-      .map((row) => row.id);
-    if (ids.length > 0) await this.prisma.aiMessage.deleteMany({ where: { id: { in: ids } } });
+    if (!anchor) return;
+    await this.prisma.aiMessage.deleteMany({
+      where: { conversationId, createdAt: { gte: anchor.createdAt } },
+    });
   }
 
   private defaultModel(fromSettings: string | null): string {

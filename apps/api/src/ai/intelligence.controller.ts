@@ -140,7 +140,7 @@ export class IntelligenceController {
     @Req() request: Request,
     @Res() response: Response,
   ): Promise<void> {
-    const controller = abortOn(request);
+    const controller = abortOn(response);
     await stream(
       response,
       async function* (this: IntelligenceController) {
@@ -270,7 +270,7 @@ export class IntelligenceController {
     @Req() request: Request,
     @Res() response: Response,
   ): Promise<void> {
-    const controller = abortOn(request);
+    const controller = abortOn(response);
     await stream(response, this.chat.send(user.id, id, dto, controller.signal));
   }
 
@@ -329,10 +329,19 @@ async function stream(
   }
 }
 
-/** The stop button, and the closed tab, are the same signal to the model. */
-function abortOn(request: Request): AbortController {
+/**
+ * The stop button, and the closed tab, are the same signal to the model.
+ *
+ * Listened for on the response, not the request. Node emits `close` on an
+ * IncomingMessage once its body has been read, which body-parser has already
+ * done before a controller runs — so a listener attached here would either fire
+ * instantly or, as it did, never fire at all and leave Ollama generating into a
+ * socket nobody was reading. The response closes when the client actually goes
+ * away, which is the event that was wanted.
+ */
+function abortOn(response: Response): AbortController {
   const controller = new AbortController();
-  request.on('close', () => controller.abort());
+  response.on('close', () => controller.abort());
   return controller;
 }
 

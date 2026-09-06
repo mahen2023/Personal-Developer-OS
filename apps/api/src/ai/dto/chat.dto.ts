@@ -98,10 +98,17 @@ export class SendMessageDto {
   @IsEnum(AiMode)
   mode?: AiMode;
 
-  /** Drops the last exchange and asks again (§13). */
+  /**
+   * Rewind to this message and ask from there (§13).
+   *
+   * One mechanism for two actions, because they are the same edit: regenerating
+   * re-sends the question unchanged, editing re-sends it altered. Both delete
+   * the named message and everything after it — an answer that no longer
+   * follows from the conversation above it is worse than no answer.
+   */
   @IsOptional()
-  @IsBoolean()
-  regenerate?: boolean;
+  @IsUUID()
+  fromMessageId?: string;
 
   @IsOptional()
   @IsUUID()

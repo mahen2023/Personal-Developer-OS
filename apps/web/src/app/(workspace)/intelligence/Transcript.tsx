@@ -7,6 +7,7 @@ import {
   BookmarkPlus,
   ChevronUp,
   CircleDashed,
+  PenLine,
   RefreshCw,
   Terminal,
 } from 'lucide-react';
@@ -34,6 +35,7 @@ export function Transcript({
   hasMore,
   onLoadOlder,
   onRegenerate,
+  onEdit,
   onRetry,
   onAsk,
   projectId,
@@ -44,6 +46,7 @@ export function Transcript({
   hasMore: boolean;
   onLoadOlder: () => void;
   onRegenerate: (message: AiMessage) => void;
+  onEdit: (message: AiMessage, text: string) => void;
   onRetry: () => void;
   onAsk: (question: string) => void;
   projectId: string | null;
@@ -75,6 +78,7 @@ export function Transcript({
             key={message.id}
             message={message}
             onRegenerate={() => onRegenerate(message)}
+            onEdit={(text) => onEdit(message, text)}
             onAsk={onAsk}
             projectId={projectId}
           />
@@ -106,16 +110,19 @@ function SystemMarker({ content }: { content: string }) {
 function Turn({
   message,
   onRegenerate,
+  onEdit,
   onAsk,
   projectId,
 }: {
   message: AiMessage;
   onRegenerate: () => void;
+  onEdit: (text: string) => void;
   onAsk: (question: string) => void;
   projectId: string | null;
 }) {
   const isUser = message.role === 'USER';
   const sources = Array.isArray(message.sources) ? message.sources : [];
+  const [editing, setEditing] = useState(false);
 
   return (
     <article className="anim-enter">
@@ -129,9 +136,27 @@ function Turn({
       </header>
 
       {isUser ? (
-        <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--text-muted)]">
-          {message.content}
-        </p>
+        editing ? (
+          <EditQuestion
+            initial={message.content}
+            onCancel={() => setEditing(false)}
+            onSave={(text) => {
+              setEditing(false);
+              onEdit(text);
+            }}
+          />
+        ) : (
+          <div className="group">
+            <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--text-muted)]">
+              {message.content}
+            </p>
+            {/* Revealed on hover: editing a question is deliberate, and a button
+                on every turn would compete with the answers for attention. */}
+            <div className="mt-[5px] opacity-0 transition-opacity duration-[var(--fast)] focus-within:opacity-100 group-hover:opacity-100">
+              <Action icon={PenLine} label="Edit and resend" onClick={() => setEditing(true)} />
+            </div>
+          </div>
+        )
       ) : (
         <>
           <Markdown>{message.content}</Markdown>
@@ -245,6 +270,70 @@ function Sources({ sources }: { sources: AiSource[] }) {
         ))}
       </ul>
     </section>
+  );
+}
+
+/**
+ * Editing a question and asking again (§13).
+ *
+ * The warning is not decoration. Editing rewinds the conversation: this turn
+ * and everything after it is replaced, because an answer that no longer follows
+ * from the question above it is a transcript that lies about what was asked.
+ */
+function EditQuestion({
+  initial,
+  onSave,
+  onCancel,
+}: {
+  initial: string;
+  onSave: (text: string) => void;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState(initial);
+  const field = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const node = field.current;
+    if (!node) return;
+    node.style.height = 'auto';
+    node.style.height = `${Math.min(node.scrollHeight, 320)}px`;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+  }, []);
+
+  return (
+    <div>
+      <textarea
+        ref={field}
+        value={text}
+        onChange={(event) => {
+          setText(event.target.value);
+          event.target.style.height = 'auto';
+          event.target.style.height = `${Math.min(event.target.scrollHeight, 320)}px`;
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') onCancel();
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            if (text.trim()) onSave(text.trim());
+          }
+        }}
+        className="mono w-full resize-none rounded border border-[var(--accent-line)] bg-[var(--surface-base)] p-[9px] text-[12.5px] leading-relaxed outline-none"
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button
+          variant="primary"
+          disabled={!text.trim() || text.trim() === initial}
+          onClick={() => onSave(text.trim())}
+        >
+          Ask again
+        </Button>
+        <Button onClick={onCancel}>Cancel</Button>
+        <span className="text-[11px] leading-tight text-[var(--text-faint)]">
+          This turn and everything after it is replaced.
+        </span>
+      </div>
+    </div>
   );
 }
 

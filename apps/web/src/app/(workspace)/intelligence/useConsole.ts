@@ -82,7 +82,7 @@ export function useConsole(conversationId: string | null) {
   const send = useCallback(
     async (
       text: string,
-      options: { model?: string; mode?: AiMode; regenerate?: boolean; profileId?: string } = {},
+      options: { model?: string; mode?: AiMode; fromMessageId?: string; profileId?: string } = {},
     ) => {
       if (!conversationId || !text.trim()) return;
 
