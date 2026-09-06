@@ -49,7 +49,8 @@ export function Composer({
   modes: ModeDefinition[];
   streaming: boolean;
   attachments: { ref: string; label: string }[];
-  onSend: (text: string) => void;
+  /** Resolves false when nothing was generated, so the text can come back. */
+  onSend: (text: string) => Promise<boolean>;
   onStop: () => void;
   onCommand: (command: string, argument: string) => void;
   onDetach: (ref: string) => void;
@@ -72,7 +73,7 @@ export function Composer({
     node.style.height = `${Math.min(node.scrollHeight, 220)}px`;
   }, [value]);
 
-  function submit() {
+  async function submit(): Promise<void> {
     const text = value.trim();
     if (!text) return;
 
@@ -83,8 +84,16 @@ export function Composer({
       return;
     }
     if (streaming) return;
-    onSend(text);
+
+    // Cleared optimistically, because a box that stays full while the answer
+    // streams invites sending it twice — and restored if the send came to
+    // nothing, because retyping a paragraph is not the developer's job.
     setValue('');
+    const ok = await onSend(text);
+    if (!ok) {
+      setValue((current) => (current.trim() ? current : text));
+      input.current?.focus();
+    }
   }
 
   return (
@@ -155,11 +164,11 @@ export function Composer({
             // safe to reach, because a pasted stack trace needs one (§52).
             if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
               event.preventDefault();
-              submit();
+              void submit();
             }
             if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
               event.preventDefault();
-              submit();
+              void submit();
             }
           }}
           placeholder={
@@ -180,7 +189,7 @@ export function Composer({
           </button>
         ) : (
           <button
-            onClick={submit}
+            onClick={() => void submit()}
             disabled={!value.trim()}
             className="inline-flex h-[26px] shrink-0 items-center gap-[6px] rounded border border-line bg-[var(--surface-raised)] px-[9px] text-[11.5px] transition-colors hover:border-[var(--line-strong)] disabled:opacity-40"
           >

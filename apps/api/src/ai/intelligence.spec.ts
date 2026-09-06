@@ -7,7 +7,7 @@ import {
   trimHistory,
 } from './chat/prompt';
 import { MODES, SELECTABLE_SOURCES, assertNoSecrets } from './chat/modes';
-import { classify } from './providers/ollama.provider';
+import { classify, watchdog } from './providers/ollama.provider';
 import type { PromptSource } from './chat/prompt';
 
 function source(overrides: Partial<PromptSource> = {}): PromptSource {
@@ -211,5 +211,46 @@ describe('classify', () => {
 
   it('reads a 404 as a missing model even when the body says nothing', () => {
     expect(classify('Ollama returned 404.', 'codellama:13b', 404).reason).toBe('MODEL_MISSING');
+  });
+});
+
+describe('watchdog', () => {
+  const tick = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('does not fire while something keeps arriving', async () => {
+    const watch = watchdog(60);
+    for (let index = 0; index < 5; index += 1) {
+      await tick(20);
+      watch.touch();
+    }
+    expect(watch.signal.aborted).toBe(false);
+    expect(watch.timedOut).toBe(false);
+    watch.done();
+  });
+
+  // The bug this replaces: an absolute deadline cut a healthy answer off
+  // mid-sentence, which from the browser is a dropped connection.
+  it('fires once nothing has arrived for the whole window', async () => {
+    const watch = watchdog(40);
+    await tick(90);
+    expect(watch.signal.aborted).toBe(true);
+    expect(watch.timedOut).toBe(true);
+  });
+
+  it('stops when the caller stops, and does not call that a timeout', async () => {
+    const controller = new AbortController();
+    const watch = watchdog(10_000, controller.signal);
+    controller.abort();
+    await tick(5);
+    expect(watch.signal.aborted).toBe(true);
+    // The difference between "you stopped this" and "the model went quiet".
+    expect(watch.timedOut).toBe(false);
+  });
+
+  it('goes quiet after done(), so a finished stream cannot abort a later one', async () => {
+    const watch = watchdog(30);
+    watch.done();
+    await tick(70);
+    expect(watch.signal.aborted).toBe(false);
   });
 });
