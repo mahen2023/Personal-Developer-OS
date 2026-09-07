@@ -371,9 +371,11 @@ function Sources({ sources }: { sources: AiSource[] }) {
 /**
  * Editing a question and asking again (§13).
  *
- * The warning is not decoration. Editing rewinds the conversation: this turn
- * and everything after it is replaced, because an answer that no longer follows
- * from the question above it is a transcript that lies about what was asked.
+ * Only this turn is replaced, in the place it already occupies. The model is
+ * shown the conversation up to here and nothing after it, so the answer it
+ * writes is honest about what it had — but the turns that follow are left
+ * alone, because silently deleting someone's conversation to keep a transcript
+ * tidy is a far worse trade than a thread that reads slightly out of step.
  */
 function EditQuestion({
   initial,
@@ -425,7 +427,7 @@ function EditQuestion({
         </Button>
         <Button onClick={onCancel}>Cancel</Button>
         <span className="text-[11px] leading-tight text-[var(--text-faint)]">
-          This turn and everything after it is replaced.
+          This question and its answer are replaced. The rest of the thread stays.
         </span>
       </div>
     </div>

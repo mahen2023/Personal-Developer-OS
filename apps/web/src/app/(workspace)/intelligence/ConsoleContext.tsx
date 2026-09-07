@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Cpu, Lock, PlugZap, RefreshCw } from 'lucide-react';
+import { BookOpen, Cpu, Lock, PlugZap, RefreshCw } from 'lucide-react';
 import { cx } from '@/lib/format';
 import type { AiSettings, Conversation, ModeDefinition, OllamaStatus } from '@/lib/intelligence';
 import { Button } from '@/components/primitives';
@@ -34,6 +34,9 @@ export function ConsoleContext({
   onSwitchModel: () => void;
 }) {
   const sources = conversation?.sources ?? [];
+  // A project counts: attaching one is itself a decision to bring the workspace
+  // into the conversation.
+  const usingKnowledge = sources.length > 0 || Boolean(conversation?.projectId);
 
   return (
     <div className="flex flex-col gap-4 p-4">
@@ -114,37 +117,82 @@ export function ConsoleContext({
 
       <PanelDivider />
 
-      <PanelSection title="Context sources">
-        <p className="mb-2 text-[11px] leading-relaxed text-[var(--text-faint)]">
-          Only these are searched when you ask. Fewer is sharper.
-        </p>
-        <div className="flex flex-col gap-[2px]">
-          {selectableSources.map((source) => {
-            const on = sources.includes(source);
-            return (
-              <label
-                key={source}
-                className="flex cursor-pointer items-center gap-2 rounded-sm px-1 py-[2px] transition-colors hover:bg-[var(--surface-hover)]"
-              >
-                <input
-                  type="checkbox"
-                  checked={on}
-                  onChange={() =>
-                    onChange({
-                      sources: on
-                        ? sources.filter((item) => item !== source)
-                        : [...sources, source],
-                    })
-                  }
-                  className="h-[12px] w-[12px] accent-[var(--accent)]"
-                />
-                <span className="text-[11.5px] capitalize text-[var(--text-muted)]">
-                  {source.replace(/_/g, ' ').toLowerCase()}
-                </span>
-              </label>
-            );
-          })}
-        </div>
+      <PanelSection title="Workspace knowledge">
+        {/* Off until asked for. Searching someone's notes to answer a question
+            that never needed them is an unasked-for search of their workspace,
+            and it makes every answer open by apologising for finding nothing
+            relevant. Turning it on is one click and says exactly what it does. */}
+        <button
+          onClick={() =>
+            onChange({
+              sources: usingKnowledge
+                ? []
+                : (modes.find((mode) => mode.mode === conversation?.mode)?.defaultSources ??
+                  selectableSources.slice(0, 4)),
+            })
+          }
+          disabled={!conversation}
+          className={cx(
+            'flex w-full items-center gap-2 rounded border px-[9px] py-[7px] text-left transition-colors',
+            usingKnowledge
+              ? 'border-[var(--accent-line)] bg-[var(--accent-dim)]'
+              : 'border-line bg-[var(--surface-raised)] hover:border-[var(--line-strong)]',
+            !conversation && 'opacity-45',
+          )}
+        >
+          <BookOpen
+            size={12}
+            className={cx(
+              'shrink-0',
+              usingKnowledge ? 'text-[var(--accent)]' : 'text-[var(--text-faint)]',
+            )}
+          />
+          <span className="min-w-0 flex-1">
+            <span
+              className={cx(
+                'block text-[12px]',
+                usingKnowledge ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]',
+              )}
+            >
+              {usingKnowledge ? 'Answering from your records' : 'Not using your records'}
+            </span>
+            <span className="block text-[10.5px] leading-tight text-[var(--text-faint)]">
+              {usingKnowledge
+                ? `${sources.length} source${sources.length === 1 ? '' : 's'} searched per question`
+                : 'The model answers on its own. Click to open your workspace to it.'}
+            </span>
+          </span>
+        </button>
+
+        {usingKnowledge && (
+          <div className="mt-2 flex flex-col gap-[2px]">
+            {selectableSources.map((source) => {
+              const on = sources.includes(source);
+              return (
+                <label
+                  key={source}
+                  className="flex cursor-pointer items-center gap-2 rounded-sm px-1 py-[2px] transition-colors hover:bg-[var(--surface-hover)]"
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={() =>
+                      onChange({
+                        sources: on
+                          ? sources.filter((item) => item !== source)
+                          : [...sources, source],
+                      })
+                    }
+                    className="h-[12px] w-[12px] accent-[var(--accent)]"
+                  />
+                  <span className="text-[11.5px] capitalize text-[var(--text-muted)]">
+                    {source.replace(/_/g, ' ').toLowerCase()}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        )}
       </PanelSection>
 
       <PanelDivider />
@@ -157,7 +205,9 @@ export function ConsoleContext({
             : 'Private mode is off. Turn it on in AI settings to guarantee local-only processing.'}
         </p>
         <p className="mono mt-2 text-[10.5px] text-[var(--text-faint)]">
-          index: {settings?.indexEmbeddingModel ?? '—'} ({settings?.indexMatching ?? '—'})
+          {usingKnowledge
+            ? `index: ${settings?.indexEmbeddingModel ?? '—'} (${settings?.indexMatching ?? '—'})`
+            : 'no records are being read in this conversation'}
         </p>
       </PanelSection>
     </div>

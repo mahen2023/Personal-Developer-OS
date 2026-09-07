@@ -125,11 +125,12 @@ export default function IntelligenceConsolePage() {
       if (!activeId) {
         const created = await startConversation();
         if (!created) return false;
-        // The hook is keyed on the id and has not seen the new one yet, so the
-        // first send is queued behind the state update that carries it.
-        return await new Promise<boolean>((resolve) => {
-          window.setTimeout(() => void console_.send(text).then(resolve), 0);
-        });
+        // Sent straight into the conversation just created. The hook re-keys on
+        // the next render, which is too late for this message — naming the id
+        // is what makes the first question of a new thread actually go.
+        const ok = await console_.send(text, {}, created.id);
+        await loadConversations();
+        return ok;
       }
       const ok = await console_.send(text);
       await loadConversations();

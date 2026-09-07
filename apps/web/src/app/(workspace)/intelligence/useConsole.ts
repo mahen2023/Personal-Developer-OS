@@ -67,17 +67,37 @@ export function useConsole(conversationId: string | null) {
   /** Increments per send; a stale stream compares against it and stays quiet. */
   const run = useRef(0);
 
+  /**
+   * Re-reads the transcript from the server.
+   *
+   * A failed read leaves what is on screen alone. It used to fall back to an
+   * empty list, which meant one blocked request — a blip, the throttler, two
+   * parallel calls racing the same token refresh — wiped the whole conversation
+   * off the screen while every row of it sat safely in the database. That is
+   * what "the thread vanished" was: not lost data, but a UI that treated "I
+   * could not ask" as "there is nothing".
+   */
   const read = useCallback(async (id: string, showLoading: boolean) => {
     if (showLoading) setLoading(true);
     const [record, page] = await Promise.all([
       api<Conversation>(`/ai/conversations/${id}`).catch(() => null),
       api<{ items: AiMessage[]; hasMore: boolean }>(`/ai/conversations/${id}/messages`).catch(
-        () => ({ items: [], hasMore: false }),
+        () => null,
       ),
     ]);
-    setConversation(record);
-    setMessages(page.items);
-    setHasMore(page.hasMore);
+
+    if (record) setConversation(record);
+    if (page) {
+      setMessages(page.items);
+      setHasMore(page.hasMore);
+    } else if (showLoading) {
+      // Opening a conversation that cannot be read is different: there is
+      // nothing on screen to protect, so say so rather than showing a blank.
+      setError({
+        reason: 'SERVER',
+        message: 'This conversation could not be loaded. It is still saved — try again.',
+      });
+    }
     if (showLoading) setLoading(false);
   }, []);
 
@@ -116,9 +136,14 @@ export function useConsole(conversationId: string | null) {
    * connection that dropped.
    */
   const send = useCallback(
-    async (text: string, options: SendOptions = {}): Promise<boolean> => {
+    async (text: string, options: SendOptions = {}, into?: string): Promise<boolean> => {
       const question = text.trim();
-      if (!conversationId || !question) return false;
+      // `into` names a conversation this hook has not been re-keyed to yet.
+      // Sending the first message of a brand-new conversation happens in that
+      // gap, and without it the send was made against the id the hook still
+      // held — null — and returned having done nothing at all.
+      const target = into ?? conversationId;
+      if (!target || !question) return false;
 
       // Whatever was running is finished with.
       abort.current?.abort();
@@ -147,7 +172,7 @@ export function useConsole(conversationId: string | null) {
       for (;;) {
         try {
           for await (const event of streamEvents(
-            `/ai/conversations/${conversationId}/messages`,
+            `/ai/conversations/${target}/messages`,
             { message: question, ...options },
             controller.signal,
           )) {
@@ -203,7 +228,7 @@ export function useConsole(conversationId: string | null) {
       // Re-read rather than keeping what was streamed: the stored row is the
       // one with an id, timings and token counts, and every message action
       // needs it. Deliberately without `loading` — see the note above.
-      await read(conversationId, false);
+      await read(target, false);
       return !failure;
     },
     [conversationId, conversation?.model, read],

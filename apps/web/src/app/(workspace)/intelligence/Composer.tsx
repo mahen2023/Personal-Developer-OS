@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Boxes, CornerDownLeft, Cpu, Paperclip, Square, X } from 'lucide-react';
+import { BookOpen, Boxes, CornerDownLeft, Cpu, Paperclip, Square, X } from 'lucide-react';
 import { cx } from '@/lib/format';
 import type { AiMode, Conversation, ModeDefinition, OllamaModel } from '@/lib/intelligence';
 import { KeyHint } from '@/components/primitives';
@@ -57,6 +57,8 @@ export function Composer({
   onAttach: () => void;
 }) {
   const [value, setValue] = useState('');
+  const usingKnowledge =
+    (conversation?.sources.length ?? 0) > 0 || Boolean(conversation?.projectId);
   const input = useRef<HTMLTextAreaElement>(null);
 
   const completions = useMemo(() => {
@@ -209,6 +211,23 @@ export function Composer({
             )}
         </span>
         <span>{modes.find((mode) => mode.mode === conversation?.mode)?.label ?? 'General'}</span>
+        {/* Visible without opening the panel: whether this conversation is
+            reading your records at all is the thing most worth knowing about
+            an answer before you trust it. */}
+        <span
+          className={cx(
+            'flex items-center gap-[5px]',
+            usingKnowledge ? 'text-[var(--accent)]' : undefined,
+          )}
+          title={
+            usingKnowledge
+              ? 'Your own records are searched for each question, and cited.'
+              : 'The model is answering on its own. Turn on workspace knowledge in the context panel.'
+          }
+        >
+          <BookOpen size={10} />
+          {usingKnowledge ? 'knowledge on' : 'knowledge off'}
+        </span>
         {conversation?.project && (
           <span className="flex items-center gap-[5px]">
             <Boxes size={10} /> {conversation.project.name}

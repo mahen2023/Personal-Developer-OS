@@ -4,7 +4,6 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ActivityService } from '../../activity/activity.service';
 import { PROJECT_REF, found, pageArgs, scopeToProject } from '../../common/query';
 import { page } from '../../common/dto/pagination.dto';
-import { MODES } from '../chat/modes';
 import type {
   ConversationQueryDto,
   CreateConversationDto,
@@ -117,9 +116,12 @@ export class ConversationsService {
         model: dto.model?.trim() || fallbackModel,
         mode,
         projectId: dto.projectId ?? null,
-        // Not empty by default: a conversation with no sources silently answers
-        // from the model alone, which is the opposite of what this is for.
-        sources: (dto.sources ?? MODES[mode].defaultSources).map(String),
+        // Empty by default. Reading someone's notes to answer "what does docker
+        // compose down do" is an unasked-for search of their workspace, and it
+        // makes the model apologise for finding nothing relevant to a question
+        // that never needed it. The context panel is what turns retrieval on,
+        // and a mode's defaultSources are what it turns on.
+        sources: (dto.sources ?? []).map(String),
         attached: dto.attached ?? [],
       },
       include: { project: PROJECT_REF, _count: { select: { messages: true } } },
