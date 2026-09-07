@@ -1,6 +1,6 @@
 import { AiMode, AiRole } from '@prisma/client';
 import type { ChatTurn } from '../providers/ai-provider.interface';
-import { MODES } from './modes';
+import { GROUND, MODES, WITH_KNOWLEDGE } from './modes';
 
 /**
  * Building the request sent to the model (§41).
@@ -62,7 +62,16 @@ export const SOURCE_BUDGET = 9_000;
 
 export function buildPrompt(context: PromptContext): ChatTurn[] {
   const definition = MODES[context.mode];
-  const system = [definition.system];
+
+  // Whether this conversation has been opened to the workspace at all. With it
+  // shut there is no mention of sources, citations or a knowledge base anywhere
+  // in the prompt — a model told to cite what it was never given spends its
+  // first sentence apologising for finding nothing.
+  const knowledge = context.sources.length > 0 || Boolean(context.project);
+
+  const system = [GROUND];
+  if (knowledge) system.push(WITH_KNOWLEDGE);
+  system.push(definition.system);
 
   if (context.project) system.push(`PROJECT\n${context.project}`);
   if (context.systemPrompt?.trim()) system.push(context.systemPrompt.trim());
@@ -70,9 +79,10 @@ export function buildPrompt(context: PromptContext): ChatTurn[] {
   const sources = renderSources(context.sources);
   if (sources) {
     system.push(sources);
-  } else {
+  } else if (knowledge) {
     // Said out loud, because a model handed no sources will otherwise cite
-    // sources that do not exist rather than admit the shelf was empty.
+    // sources that do not exist rather than admit the shelf was empty. Only
+    // when retrieval was asked for at all — otherwise there is no shelf.
     system.push(
       "SOURCES\nNothing in the developer's workspace matched this question. Say so before answering from general knowledge.",
     );

@@ -28,7 +28,8 @@ browser
 Next.js (:3000) ──► /api/[...path] proxy ──► NestJS (:4000) ──► PostgreSQL
    │                                              │
    └─ shell, design system, palette               ├─ Redis ──► worker (BullMQ, phase 7)
-                                                  └─ FileStorageService ──► local disk
+                                                  ├─ FileStorageService ──► local disk
+                                                  └─ Ollama (:11434, on the host)
 ```
 
 The browser never talks to the API host directly. The Next route handler at
@@ -52,7 +53,7 @@ provider in `common/` or a global module.
 | `activity/`      | The feed every module writes to                                    |
 | `dashboard/`     | Counts, the attention centre, recent work — all derived on read    |
 | `health/`        | `/health` (liveness, touches nothing) and `/ready` (checks the DB) |
-| `ai/`            | Chunking, embeddings, pgvector retrieval, the grounded assistant   |
+| `ai/`            | Chunking, embeddings, pgvector retrieval, the intelligence console |
 | `notifications/` | Raising, deduplicating and delivering what needs attention         |
 | `jobs/`          | The BullMQ queue, the nightly scans, backups and export            |
 | `integrations/`  | GitHub, GitLab and Cloudflare, all optional, all plain REST        |
@@ -91,6 +92,58 @@ issues are open") runs one of a fixed set of hand-written queries, and only a
 knowledge question goes to retrieval. Nothing generates SQL. When answer
 generation is off, retrieval returns the passages themselves, which is the more
 useful half anyway.
+
+### The Developer Intelligence console
+
+`ai/chat/`, `ai/providers/`, `ai/conversations/`, `ai/models/`, `ai/settings/`.
+
+A streaming assistant on a local Ollama. It sits **on top of** retrieval rather
+than beside it: the `chunks` rows above are the sources it cites, so a record
+becomes quotable by being indexed and by nothing else.
+
+| File                             | Holds                                                 |
+| -------------------------------- | ----------------------------------------------------- |
+| `providers/ollama.provider.ts`   | Every request this application makes to Ollama        |
+| `chat/context.service.ts`        | Everything a model is allowed to see                  |
+| `chat/prompt.ts`                 | The prompt itself, as pure functions                  |
+| `chat/modes.ts`                  | The seven modes, and `SELECTABLE_SOURCES`             |
+| `chat/chat.service.ts`           | One turn, yielded event by event                      |
+| `chat/knowledge.service.ts`      | An answer saved back as a note, solution, ADR or task |
+
+Four boundaries hold this together:
+
+- **One file speaks Ollama.** `/api/tags` returning `models` while `/api/ps`
+  returns the same field with different contents is Ollama's business. Six JSON
+  endpoints read with `fetch` — no client library, and the newline-delimited
+  stream is read straight off the body.
+- **One file decides what the model sees.** Prose types are retrieved by meaning
+  and cited; row types (task, server, database, domain, deployment, environment,
+  repository) are never indexed and are listed as a compact brief, because a
+  paraphrase of a hostname is worse than the hostname. Teaching the console a new
+  record type means editing `context.service.ts`, never a prompt string.
+- **Prompts are pure functions**, which is the only reason they are testable —
+  and `GROUND` is split from `WITH_KNOWLEDGE` so a model given no sources is
+  never told to cite any. It would open every answer apologising for finding none.
+- **Three independent things keep the vault out**: vault items are not indexed,
+  `VAULT_ITEM` is absent from `SELECTABLE_SOURCES`, and `assertNoSecrets()` drops
+  the type even if a stored conversation asks for it. The infrastructure brief
+  selects its columns explicitly for the same reason — a future column called
+  `password` cannot arrive in a prompt by being added to the schema.
+
+A turn goes out as server-sent events. `meta` — conversation, model, sources —
+is emitted before the first token, so the sources panel renders while a cold
+model is still being read off disk. Failures before the first token are a
+`ProviderError` and become an HTTP status; after it, the status is already sent,
+so they become an `error` event on the open stream. Streaming survives the Next
+proxy because it forwards `upstream.body` untouched, and `X-Accel-Buffering`
+covers nginx, which otherwise holds a stream until it has a few kilobytes and
+makes a working console look frozen.
+
+Conversations, messages and their selected sources are ordinary Postgres rows,
+which is what makes rewinding to an earlier turn a delete rather than a
+replay. The Ollama base URL and the chosen model are per-user settings, not just
+environment variables, so the console can be pointed at another machine without
+a restart.
 
 ## Frontend
 
@@ -135,7 +188,7 @@ Motion is defined in the same file: three durations, one easing curve, and a
 
 ## Data model
 
-31 tables. The groups:
+38 tables. The groups:
 
 - **identity** — `users`, `sessions` (one row per refresh token, so revocation
   is real)
@@ -147,12 +200,22 @@ Motion is defined in the same file: three durations, one easing curve, and a
 - **knowledge** — `documents`, `bookmarks`, `learning_items`, `ideas`
 - **vault** — `vault_profiles` (KDF parameters and the wrapped data key),
   `vault_items` (ciphertext only)
+- **retrieval** — `chunks` (derived data: rebuildable from the records it came
+  from, and backed up by nothing)
+- **console** — `ai_conversations`, `ai_messages`, `ai_model_profiles`,
+  `ai_settings`, `ai_usage`
+- **integrations** — `integrations` (one row per provider, token encrypted)
 - **cross-cutting** — `tags`, `entity_tags`, `entity_links`, `activities`,
   `notifications`, `audit_logs`
 
 Indexes follow the access patterns rather than the columns: `(userId, status)`,
 `(projectId, status)`, `(userId, updatedAt)` for feeds, and bare `expiresAt` /
 `dueDate` for the daily expiry scan.
+
+`ai_messages.sources` is a JSON snapshot rather than a relation, on purpose: a
+citation has to keep saying what it said after the note it quoted is edited or
+deleted. A foreign key would either dangle or cascade the transcript away, and
+both rewrite history.
 
 Two columns exist purely to keep secrets out of the wrong place:
 

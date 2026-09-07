@@ -139,31 +139,51 @@ export class OllamaProvider implements AiProvider {
    * are only trusted from the chunk whose `done` is true.
    */
   async *chat(request: ChatRequest, signal?: AbortSignal): AsyncIterable<ChatChunk> {
-    const response = await this.request('/api/chat', {
-      method: 'POST',
-      signal,
-      body: {
-        model: request.model,
-        messages: request.messages,
-        stream: true,
-        options: options(request),
-      },
-    });
+    // The timeout is silence, not duration. An absolute AbortSignal.timeout
+    // covers the whole stream, so it cut a working answer off mid-sentence the
+    // moment the model was asked something long — which from the browser is
+    // indistinguishable from the connection dropping, because it is one.
+    const watch = watchdog(this.timeoutMs, signal);
 
-    for await (const row of ndjson<OllamaChatChunk>(response, signal)) {
-      if (row.error) throw classify(row.error, request.model);
-      const text = row.message?.content ?? '';
-      if (row.done) {
-        yield {
-          text,
-          done: true,
-          promptTokens: row.prompt_eval_count,
-          completionTokens: row.eval_count,
-          durationMs: row.total_duration ? Math.round(row.total_duration / 1e6) : undefined,
-        };
-        return;
+    try {
+      const response = await this.request('/api/chat', {
+        method: 'POST',
+        signal: watch.signal,
+        userSignal: signal,
+        timeoutMs: 0,
+        body: {
+          model: request.model,
+          messages: request.messages,
+          stream: true,
+          options: options(request),
+        },
+      });
+
+      for await (const row of ndjson<OllamaChatChunk>(response, signal, watch.touch)) {
+        if (row.error) throw classify(row.error, request.model);
+        const text = row.message?.content ?? '';
+        if (row.done) {
+          yield {
+            text,
+            done: true,
+            promptTokens: row.prompt_eval_count,
+            completionTokens: row.eval_count,
+            durationMs: row.total_duration ? Math.round(row.total_duration / 1e6) : undefined,
+          };
+          return;
+        }
+        if (text) yield { text, done: false };
       }
-      if (text) yield { text, done: false };
+    } catch (caught) {
+      if (watch.timedOut && !signal?.aborted) {
+        throw new ProviderError(
+          'TIMEOUT',
+          `${request.model} sent nothing for ${Math.round(this.timeoutMs / 1000)}s. It may have run out of memory, or OLLAMA_TIMEOUT_MS may be too tight for a model this cold.`,
+        );
+      }
+      throw caught;
+    } finally {
+      watch.done();
     }
   }
 
@@ -184,15 +204,18 @@ export class OllamaProvider implements AiProvider {
 
   /** Download progress, as it happens. The caller decides what to do with it. */
   async *pull(model: string, signal?: AbortSignal): AsyncIterable<PullProgress> {
+    // Silence again, rather than duration: an 11 GB download is not a stuck
+    // request, but ten minutes with no progress line is.
+    const watch = watchdog(PULL_IDLE_MS, signal);
     const response = await this.request('/api/pull', {
       method: 'POST',
-      signal,
-      // No timeout: an 11 GB download is not a stuck request.
+      signal: watch.signal,
+      userSignal: signal,
       timeoutMs: 0,
       body: { model, stream: true },
     });
 
-    for await (const row of ndjson<OllamaPull>(response, signal)) {
+    for await (const row of ndjson<OllamaPull>(response, signal, watch.touch)) {
       if (row.error) throw classify(row.error, model);
       yield {
         status: row.status ?? 'working',
@@ -201,6 +224,7 @@ export class OllamaProvider implements AiProvider {
         done: row.status === 'success',
       };
     }
+    watch.done();
   }
 
   async remove(model: string): Promise<void> {
@@ -216,13 +240,21 @@ export class OllamaProvider implements AiProvider {
 
   private async request(
     path: string,
-    init: { method?: string; body?: unknown; signal?: AbortSignal; timeoutMs?: number } = {},
+    init: {
+      method?: string;
+      body?: unknown;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      /** The stop button, when it differs from `signal` — see `watchdog`. */
+      userSignal?: AbortSignal;
+    } = {},
   ): Promise<Response> {
     const timeoutMs = init.timeoutMs ?? this.timeoutMs;
     // Two signals, one request: the caller's stop button and our own timeout.
     const timeout = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
     const signal =
       init.signal && timeout ? AbortSignal.any([init.signal, timeout]) : (init.signal ?? timeout);
+    const stopped = init.userSignal ?? init.signal;
 
     let response: Response;
     try {
@@ -235,7 +267,7 @@ export class OllamaProvider implements AiProvider {
     } catch (caught) {
       // A stop is the user's decision, not a fault, and must not be reported
       // as one — it is the difference between a message and a red banner.
-      if (init.signal?.aborted) throw new ProviderError('CANCELLED', 'Generation stopped.');
+      if (stopped?.aborted) throw new ProviderError('CANCELLED', 'Generation stopped.');
       if ((caught as Error).name === 'TimeoutError' || (caught as Error).name === 'AbortError') {
         throw new ProviderError(
           'TIMEOUT',
@@ -348,6 +380,60 @@ export function classify(message: string, model?: string, httpStatus?: number): 
   return new ProviderError('SERVER', message);
 }
 
+/** Ten minutes with no progress line means a download really has stalled. */
+const PULL_IDLE_MS = 600_000;
+
+/**
+ * A deadline that resets every time something arrives.
+ *
+ * `AbortSignal.timeout` cannot express this: it fires a fixed time after it is
+ * created, which is right for a request that should return once and wrong for a
+ * stream meant to keep going.
+ *
+ * The caller's own signal is chained in so a stop still stops, and `timedOut`
+ * records which of the two fired — "you stopped this" and "the model went
+ * quiet" are not the same message.
+ */
+export function watchdog(
+  ms: number,
+  signal?: AbortSignal,
+): { signal: AbortSignal; touch: () => void; done: () => void; readonly timedOut: boolean } {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+
+  const done = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+  };
+
+  const touch = (): void => {
+    done();
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, ms);
+    // A pending timer keeps Node alive; this one must never be why a worker
+    // refuses to shut down.
+    timer.unref?.();
+  };
+
+  signal?.addEventListener('abort', () => {
+    done();
+    controller.abort();
+  });
+
+  if (ms > 0) touch();
+  return {
+    signal: controller.signal,
+    touch,
+    done,
+    get timedOut() {
+      return timedOut;
+    },
+  };
+}
+
 function asProviderError(caught: unknown): ProviderError {
   return caught instanceof ProviderError
     ? caught
@@ -361,7 +447,11 @@ function asProviderError(caught: unknown): ProviderError {
  * and the middle of a line, so bytes are decoded with `stream: true` and the
  * tail is held back until its newline arrives.
  */
-async function* ndjson<T>(response: Response, signal?: AbortSignal): AsyncIterable<T> {
+async function* ndjson<T>(
+  response: Response,
+  signal?: AbortSignal,
+  touch?: () => void,
+): AsyncIterable<T> {
   const body = response.body;
   if (!body) throw new ProviderError('SERVER', 'Ollama sent an empty response.');
 
@@ -373,6 +463,9 @@ async function* ndjson<T>(response: Response, signal?: AbortSignal): AsyncIterab
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      // Anything arriving counts as alive, including a chunk that does not yet
+      // complete a line.
+      touch?.();
       buffer += decoder.decode(value, { stream: true });
 
       let newline = buffer.indexOf('\n');

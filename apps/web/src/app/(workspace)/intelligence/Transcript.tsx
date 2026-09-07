@@ -7,54 +7,79 @@ import {
   BookmarkPlus,
   ChevronUp,
   CircleDashed,
+  Copy,
+  CornerDownRight,
+  PenLine,
   RefreshCw,
-  Terminal,
+  TriangleAlert,
 } from 'lucide-react';
 import { api } from '@/lib/api';
-import { cx, clockTime } from '@/lib/format';
+import { clockTime, cx } from '@/lib/format';
 import { type AiMessage, type AiSource, formatDuration, sourceLabel } from '@/lib/intelligence';
 import { Button } from '@/components/primitives';
-import { Markdown, CopyButton } from '@/components/patterns/Markdown';
+import { Markdown } from '@/components/patterns/Markdown';
+import { ActionRow, IconAction, useConfirmation } from './MessageActions';
 import type { ConsoleError, Pending } from './useConsole';
 
 /**
  * The conversation itself (§48).
  *
- * Not chat bubbles. A turn is a labelled block with a hairline above it, the
- * way a terminal session or a technical record reads — the speaker is a small
- * tracked label, the content is prose at reading width, and the machine
- * details sit in a footer in monospace. Nothing is in a rounded card, nothing
- * has an avatar, and the two speakers are told apart by typography rather than
- * by alignment or colour.
+ * Not chat bubbles. A turn is a labelled block under a hairline, the way a
+ * terminal session or a technical record reads — the speaker is a small tracked
+ * label, the content is prose at reading width, and the machine details sit in
+ * a monospace footer. Nothing is in a rounded card, nothing has an avatar, and
+ * the two speakers are told apart by typography rather than by alignment.
+ *
+ * Actions are icons revealed on hover, in the same order on both speakers. The
+ * last turn keeps its actions visible, because that is the one being read.
  */
 export function Transcript({
   messages,
   pending,
   error,
+  streaming,
   hasMore,
   onLoadOlder,
   onRegenerate,
+  onEdit,
+  onContinue,
   onRetry,
-  onAsk,
   projectId,
 }: {
   messages: AiMessage[];
   pending: Pending | null;
   error: ConsoleError | null;
+  streaming: boolean;
   hasMore: boolean;
   onLoadOlder: () => void;
   onRegenerate: (message: AiMessage) => void;
+  onEdit: (message: AiMessage, text: string) => void;
+  onContinue: (message: AiMessage) => void;
   onRetry: () => void;
-  onAsk: (question: string) => void;
   projectId: string | null;
 }) {
   const bottom = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
 
-  // Follows the stream. `auto` rather than `smooth`: at 40 tokens a second a
-  // smooth scroll never arrives before the next one starts.
+  // Follows the stream, but only while the reader is already at the bottom.
+  // Yanking the view down while someone reads an earlier answer is the most
+  // irritating thing a transcript can do.
   useEffect(() => {
-    bottom.current?.scrollIntoView({ block: 'end' });
+    if (stick.current) bottom.current?.scrollIntoView({ block: 'end' });
   }, [messages.length, pending?.answer]);
+
+  useEffect(() => {
+    const container = bottom.current?.closest('[data-transcript-scroll]');
+    if (!container) return;
+    const onScroll = (): void => {
+      const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
+      stick.current = distance < 120;
+    };
+    container.addEventListener('scroll', onScroll, { passive: true });
+    return () => container.removeEventListener('scroll', onScroll);
+  }, []);
+
+  const lastId = messages.at(-1)?.id;
 
   return (
     <div className="flex flex-col gap-6 px-6 py-5">
@@ -74,8 +99,11 @@ export function Transcript({
           <Turn
             key={message.id}
             message={message}
+            isLast={message.id === lastId && !pending}
+            streaming={streaming}
             onRegenerate={() => onRegenerate(message)}
-            onAsk={onAsk}
+            onEdit={(text) => onEdit(message, text)}
+            onContinue={() => onContinue(message)}
             projectId={projectId}
           />
         ),
@@ -105,20 +133,41 @@ function SystemMarker({ content }: { content: string }) {
 
 function Turn({
   message,
+  isLast,
+  streaming,
   onRegenerate,
-  onAsk,
+  onEdit,
+  onContinue,
   projectId,
 }: {
   message: AiMessage;
+  isLast: boolean;
+  streaming: boolean;
   onRegenerate: () => void;
-  onAsk: (question: string) => void;
+  onEdit: (text: string) => void;
+  onContinue: () => void;
   projectId: string | null;
 }) {
   const isUser = message.role === 'USER';
   const sources = Array.isArray(message.sources) ? message.sources : [];
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [copied, confirmCopy] = useConfirmation();
+  const [saved, confirmSave] = useConfirmation(2400);
+
+  async function copy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      confirmCopy();
+    } catch {
+      // Clipboard access can be refused on an insecure origin. Silence would
+      // look exactly like success.
+      window.prompt('Copy this manually:', message.content);
+    }
+  }
 
   return (
-    <article className="anim-enter">
+    <article className="anim-enter group">
       <header className="mb-[6px] flex items-baseline gap-2 border-b border-line pb-[5px]">
         <h2 className="label text-[var(--text-muted)]">
           {isUser ? 'You' : (message.model ?? 'Assistant')}
@@ -129,31 +178,102 @@ function Turn({
       </header>
 
       {isUser ? (
-        <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--text-muted)]">
-          {message.content}
-        </p>
+        editing ? (
+          <EditQuestion
+            initial={message.content}
+            onCancel={() => setEditing(false)}
+            onSave={(text) => {
+              setEditing(false);
+              onEdit(text);
+            }}
+          />
+        ) : (
+          <>
+            <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--text-muted)]">
+              {message.content}
+            </p>
+            <ActionRow visible={isLast}>
+              <IconAction icon={Copy} label="Copy" onClick={() => void copy()} done={copied} />
+              <IconAction
+                icon={PenLine}
+                label="Edit and resend"
+                onClick={() => setEditing(true)}
+                disabled={streaming}
+              />
+              <IconAction
+                icon={RefreshCw}
+                label="Ask this again"
+                onClick={onRegenerate}
+                disabled={streaming}
+              />
+            </ActionRow>
+          </>
+        )
       ) : (
         <>
           <Markdown>{message.content}</Markdown>
           {sources.length > 0 && <Sources sources={sources} />}
-          <Footer
-            message={message}
-            onRegenerate={onRegenerate}
-            onAsk={onAsk}
-            projectId={projectId}
-          />
+
+          <ActionRow visible={isLast}>
+            <IconAction icon={Copy} label="Copy" onClick={() => void copy()} done={copied} />
+            <IconAction
+              icon={RefreshCw}
+              label="Regenerate"
+              onClick={onRegenerate}
+              disabled={streaming}
+            />
+            <IconAction
+              icon={CornerDownRight}
+              label="Continue this answer"
+              onClick={onContinue}
+              disabled={streaming}
+            />
+            <IconAction
+              icon={BookmarkPlus}
+              label="Save as a record"
+              onClick={() => setSaving((open) => !open)}
+              done={saved}
+            />
+
+            <span className="mono ml-auto pr-1 text-[10.5px] text-[var(--text-faint)]">
+              {[
+                formatDuration(message.durationMs),
+                message.completionTokens ? `${message.completionTokens} tok` : null,
+                speedOf(message),
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </span>
+          </ActionRow>
+
+          {saving && (
+            <SaveDialog
+              message={message}
+              projectId={projectId}
+              onSaved={() => {
+                setSaving(false);
+                confirmSave();
+              }}
+              onClose={() => setSaving(false)}
+            />
+          )}
         </>
       )}
     </article>
   );
 }
 
+function speedOf(message: AiMessage): string | null {
+  if (!message.completionTokens || !message.durationMs) return null;
+  return `${((message.completionTokens / message.durationMs) * 1000).toFixed(0)} tok/s`;
+}
+
 /**
  * The answer as it arrives (§12).
  *
- * The sources render before the first token, because they are known before the
- * model has read its prompt — on a cold model that is several seconds where
- * the screen would otherwise say nothing at all.
+ * Sources render before the first token, because they are known before the
+ * model has finished reading its prompt — on a cold model that is several
+ * seconds where the screen would otherwise say nothing at all.
  */
 function Streaming({ pending }: { pending: Pending }) {
   const [elapsed, setElapsed] = useState(0);
@@ -183,7 +303,7 @@ function Streaming({ pending }: { pending: Pending }) {
               className="animate-spin"
               style={{ animationDuration: '2.4s' }}
             />
-            {(elapsed / 1000).toFixed(1)}s
+            {(elapsed / 1000).toFixed(1)}s{pending.reconnecting ? ' · reconnecting' : ''}
           </span>
         </header>
 
@@ -193,7 +313,7 @@ function Streaming({ pending }: { pending: Pending }) {
           <Markdown>{pending.answer}</Markdown>
         ) : (
           <p className="mono text-[11.5px] text-[var(--text-faint)]">
-            reading context
+            {pending.reconnecting ? 'reconnecting' : 'reading context'}
             <span style={{ animation: 'caret 1.1s step-end infinite' }}>_</span>
           </p>
         )}
@@ -248,67 +368,69 @@ function Sources({ sources }: { sources: AiSource[] }) {
   );
 }
 
-/** §13 and §30: the actions, and the numbers, kept quiet until wanted. */
-function Footer({
-  message,
-  onRegenerate,
-  onAsk,
-  projectId,
+/**
+ * Editing a question and asking again (§13).
+ *
+ * Only this turn is replaced, in the place it already occupies. The model is
+ * shown the conversation up to here and nothing after it, so the answer it
+ * writes is honest about what it had — but the turns that follow are left
+ * alone, because silently deleting someone's conversation to keep a transcript
+ * tidy is a far worse trade than a thread that reads slightly out of step.
+ */
+function EditQuestion({
+  initial,
+  onSave,
+  onCancel,
 }: {
-  message: AiMessage;
-  onRegenerate: () => void;
-  onAsk: (question: string) => void;
-  projectId: string | null;
+  initial: string;
+  onSave: (text: string) => void;
+  onCancel: () => void;
 }) {
-  const [saving, setSaving] = useState(false);
-  const speed =
-    message.completionTokens && message.durationMs
-      ? ((message.completionTokens / message.durationMs) * 1000).toFixed(0)
-      : null;
+  const [text, setText] = useState(initial);
+  const field = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const node = field.current;
+    if (!node) return;
+    node.style.height = 'auto';
+    node.style.height = `${Math.min(node.scrollHeight, 320)}px`;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+  }, []);
 
   return (
-    <>
-      <div className="mt-2 flex flex-wrap items-center gap-[6px]">
-        <CopyButton value={message.content} label="Copy" />
-        <Action icon={RefreshCw} label="Regenerate" onClick={onRegenerate} />
-        <Action icon={Terminal} label="Continue" onClick={() => onAsk('Continue.')} />
-        <Action icon={BookmarkPlus} label="Save" onClick={() => setSaving(true)} />
-
-        <span className="mono ml-auto text-[10.5px] text-[var(--text-faint)]">
-          {[
-            formatDuration(message.durationMs),
-            message.completionTokens ? `${message.completionTokens} tok` : null,
-            speed ? `${speed} tok/s` : null,
-          ]
-            .filter(Boolean)
-            .join(' · ')}
+    <div>
+      <textarea
+        ref={field}
+        value={text}
+        onChange={(event) => {
+          setText(event.target.value);
+          event.target.style.height = 'auto';
+          event.target.style.height = `${Math.min(event.target.scrollHeight, 320)}px`;
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') onCancel();
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            if (text.trim()) onSave(text.trim());
+          }
+        }}
+        className="mono w-full resize-none rounded border border-[var(--accent-line)] bg-[var(--surface-base)] p-[9px] text-[12.5px] leading-relaxed outline-none"
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button
+          variant="primary"
+          disabled={!text.trim() || text.trim() === initial}
+          onClick={() => onSave(text.trim())}
+        >
+          Ask again
+        </Button>
+        <Button onClick={onCancel}>Cancel</Button>
+        <span className="text-[11px] leading-tight text-[var(--text-faint)]">
+          This question and its answer are replaced. The rest of the thread stays.
         </span>
       </div>
-
-      {saving && (
-        <SaveDialog message={message} projectId={projectId} onClose={() => setSaving(false)} />
-      )}
-    </>
-  );
-}
-
-function Action({
-  icon: Icon,
-  label,
-  onClick,
-}: {
-  icon: typeof RefreshCw;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex h-[24px] items-center gap-[5px] rounded border border-line bg-[var(--surface-raised)] px-[7px] text-[11.5px] transition-colors duration-[var(--fast)] hover:border-[var(--line-strong)]"
-    >
-      <Icon size={11} /> {label}
-    </button>
+    </div>
   );
 }
 
@@ -330,15 +452,18 @@ const TARGETS = [
 function SaveDialog({
   message,
   projectId,
+  onSaved,
   onClose,
 }: {
   message: AiMessage;
   projectId: string | null;
+  onSaved: () => void;
   onClose: () => void;
 }) {
   const [target, setTarget] = useState('note');
   const [title, setTitle] = useState('');
   const [saved, setSaved] = useState<{ href: string; title: string } | null>(null);
+  const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   if (saved) {
@@ -390,20 +515,32 @@ function SaveDialog({
           disabled={busy}
           onClick={async () => {
             setBusy(true);
+            setFailed(false);
             const result = await api<{ href: string; title: string }>(
               `/ai/messages/${message.id}/save`,
               { method: 'POST', body: { target, title: title.trim() || undefined, projectId } },
             ).catch(() => null);
             setBusy(false);
-            if (result) setSaved(result);
+            if (result) {
+              setSaved(result);
+              onSaved();
+            } else {
+              setFailed(true);
+            }
           }}
         >
           {busy ? 'Saving…' : 'Save'}
         </Button>
         <Button onClick={onClose}>Cancel</Button>
-        <p className="ml-auto max-w-[280px] text-[11px] leading-tight text-[var(--text-faint)]">
-          The model, the question and the sources are recorded with it.
-        </p>
+        {failed ? (
+          <span className="flex items-center gap-1 text-[11px] text-[var(--danger)]">
+            <TriangleAlert size={11} /> That could not be saved. Try again.
+          </span>
+        ) : (
+          <p className="ml-auto max-w-[280px] text-[11px] leading-tight text-[var(--text-faint)]">
+            The model, the question and the sources are recorded with it.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -419,7 +556,10 @@ function Failure({ error, onRetry }: { error: ConsoleError; onRetry: () => void 
     ],
     MODEL_MISSING: ['Pull it, or pick another model from the switcher (⌘⇧M).'],
     OUT_OF_MEMORY: ['Try a smaller model, or a lower quantisation of the same one.'],
-    TIMEOUT: ['A cold model is read off disk first. Raise OLLAMA_TIMEOUT_MS if this repeats.'],
+    TIMEOUT: [
+      'The model went quiet rather than slow. A cold start costs this once; raise OLLAMA_TIMEOUT_MS if it repeats.',
+    ],
+    SERVER: ['The connection dropped. Your question is back in the box — send it again.'],
   };
 
   return (
@@ -435,7 +575,7 @@ function Failure({ error, onRetry }: { error: ConsoleError; onRetry: () => void 
       ))}
       <div className="mt-3 flex gap-2">
         <Button onClick={onRetry}>
-          <RefreshCw size={12} /> Retry
+          <RefreshCw size={12} /> Dismiss
         </Button>
         <Link href="/settings/intelligence">
           <Button>AI settings</Button>

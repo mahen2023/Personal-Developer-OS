@@ -113,18 +113,28 @@ export default function IntelligenceConsolePage() {
     [models, status?.chatModel],
   );
 
-  /** Sending with no conversation open creates one, so the first ask just works. */
+  /**
+   * Sending with no conversation open creates one, so the first ask just works.
+   *
+   * Reports back whether anything was generated. The composer holds the text
+   * until this says yes — losing what someone typed because a connection blinked
+   * is the worst thing this screen can do.
+   */
   const send = useCallback(
-    async (text: string) => {
+    async (text: string): Promise<boolean> => {
       if (!activeId) {
         const created = await startConversation();
-        if (!created) return;
-        // The hook is keyed on the id, so the send waits for it to be current.
-        window.setTimeout(() => void console_.send(text), 0);
-        return;
+        if (!created) return false;
+        // Sent straight into the conversation just created. The hook re-keys on
+        // the next render, which is too late for this message — naming the id
+        // is what makes the first question of a new thread actually go.
+        const ok = await console_.send(text, {}, created.id);
+        await loadConversations();
+        return ok;
       }
-      await console_.send(text);
+      const ok = await console_.send(text);
       await loadConversations();
+      return ok;
     },
     [activeId, console_, loadConversations, startConversation],
   );
@@ -373,7 +383,7 @@ export default function IntelligenceConsolePage() {
           </div>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto" data-transcript-scroll>
           {status && status.state !== 'ONLINE' && <EngineBanner status={status} />}
 
           {console_.loading ? (
@@ -390,17 +400,32 @@ export default function IntelligenceConsolePage() {
               messages={console_.messages}
               pending={console_.pending}
               error={console_.error}
+              streaming={console_.streaming}
               hasMore={console_.hasMore}
               projectId={console_.conversation?.projectId ?? null}
               onLoadOlder={() => void console_.loadOlder()}
               onRegenerate={(message) => {
-                const question = [...console_.messages]
+                // Anchored to the question, not to the answer: the server
+                // rewinds to that turn and asks again from exactly there.
+                // Found by position rather than by timestamp — the list is
+                // already in order, and comparing dates as strings is a trap
+                // waiting for the day one of them is not an ISO string.
+                const at = console_.messages.findIndex((row) => row.id === message.id);
+                const question = console_.messages
+                  .slice(0, Math.max(at, 0))
                   .reverse()
-                  .find((row) => row.role === 'USER' && row.createdAt < message.createdAt);
-                if (question) void console_.send(question.content, { regenerate: true });
+                  .find((row) => row.role === 'USER');
+                if (question) {
+                  void console_.send(question.content, { fromMessageId: question.id });
+                }
+              }}
+              onEdit={(message, text) => void console_.send(text, { fromMessageId: message.id })}
+              onContinue={() => {
+                // Continuing is an ordinary turn, not a rewind: the answer so
+                // far stays and the model is asked to carry on from it.
+                void send('Continue from where you stopped. Do not repeat yourself.');
               }}
               onRetry={() => console_.dismissError()}
-              onAsk={(question) => void send(question)}
             />
           )}
         </div>
@@ -411,7 +436,7 @@ export default function IntelligenceConsolePage() {
           modes={modes}
           streaming={console_.streaming}
           attachments={attachments}
-          onSend={(text) => void send(text)}
+          onSend={send}
           onStop={console_.stop}
           onCommand={(command, argument) => void runCommand(command, argument)}
           onDetach={(ref) =>

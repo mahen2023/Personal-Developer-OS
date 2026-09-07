@@ -7,7 +7,8 @@ import {
   trimHistory,
 } from './chat/prompt';
 import { MODES, SELECTABLE_SOURCES, assertNoSecrets } from './chat/modes';
-import { classify } from './providers/ollama.provider';
+import { turnSpan } from './chat/chat.service';
+import { classify, watchdog } from './providers/ollama.provider';
 import type { PromptSource } from './chat/prompt';
 
 function source(overrides: Partial<PromptSource> = {}): PromptSource {
@@ -40,10 +41,10 @@ describe('buildPrompt', () => {
 
   // Without this the model invents a citation rather than admitting the shelf
   // was empty, which is the one failure that makes the whole console untrustworthy.
-  it('says so out loud when retrieval found nothing', () => {
+  it('says so out loud when retrieval was asked for and found nothing', () => {
     const [system] = buildPrompt({
       mode: AiMode.GENERAL,
-      project: null,
+      project: 'Name: Basuki Automaton',
       sources: [],
       history: [],
       question: 'anything',
@@ -177,9 +178,16 @@ describe('the secret boundary', () => {
     expect(assertNoSecrets(asked)).toEqual([EntityType.NOTE, EntityType.SOLUTION]);
   });
 
-  it('tells every mode that secret values are unavailable to it', () => {
-    for (const definition of Object.values(MODES)) {
-      expect(definition.system).toMatch(/Secret values are never available/);
+  it('tells the model that secret values are unavailable, in every mode', () => {
+    for (const mode of Object.keys(MODES) as AiMode[]) {
+      const [system] = buildPrompt({
+        mode,
+        project: null,
+        sources: [],
+        history: [],
+        question: 'what is the database password',
+      });
+      expect(system.content).toMatch(/Secret values are never available/);
     }
   });
 
@@ -211,5 +219,123 @@ describe('classify', () => {
 
   it('reads a 404 as a missing model even when the body says nothing', () => {
     expect(classify('Ollama returned 404.', 'codellama:13b', 404).reason).toBe('MODEL_MISSING');
+  });
+});
+
+describe('watchdog', () => {
+  const tick = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('does not fire while something keeps arriving', async () => {
+    const watch = watchdog(60);
+    for (let index = 0; index < 5; index += 1) {
+      await tick(20);
+      watch.touch();
+    }
+    expect(watch.signal.aborted).toBe(false);
+    expect(watch.timedOut).toBe(false);
+    watch.done();
+  });
+
+  // The bug this replaces: an absolute deadline cut a healthy answer off
+  // mid-sentence, which from the browser is a dropped connection.
+  it('fires once nothing has arrived for the whole window', async () => {
+    const watch = watchdog(40);
+    await tick(90);
+    expect(watch.signal.aborted).toBe(true);
+    expect(watch.timedOut).toBe(true);
+  });
+
+  it('stops when the caller stops, and does not call that a timeout', async () => {
+    const controller = new AbortController();
+    const watch = watchdog(10_000, controller.signal);
+    controller.abort();
+    await tick(5);
+    expect(watch.signal.aborted).toBe(true);
+    // The difference between "you stopped this" and "the model went quiet".
+    expect(watch.timedOut).toBe(false);
+  });
+
+  it('goes quiet after done(), so a finished stream cannot abort a later one', async () => {
+    const watch = watchdog(30);
+    watch.done();
+    await tick(70);
+    expect(watch.signal.aborted).toBe(false);
+  });
+});
+
+describe('turnSpan', () => {
+  const user = (id: string) => ({ id, role: AiRole.USER });
+  const assistant = (id: string) => ({ id, role: AiRole.ASSISTANT });
+  const marker = (id: string) => ({ id, role: AiRole.SYSTEM });
+
+  it('takes the question and the answer it drew', () => {
+    expect(turnSpan('q1', [assistant('a1'), user('q2'), assistant('a2')])).toEqual(['q1', 'a1']);
+  });
+
+  // The failure this guards against deleted four turns of someone's work with
+  // no warning and nothing to undo it.
+  it('never reaches past the answer into the rest of the thread', () => {
+    const span = turnSpan('q1', [
+      assistant('a1'),
+      user('q2'),
+      assistant('a2'),
+      user('q3'),
+      assistant('a3'),
+    ]);
+    expect(span).not.toContain('q2');
+    expect(span).not.toContain('a2');
+    expect(span).toHaveLength(2);
+  });
+
+  it('carries a marker written inside the turn along with it', () => {
+    expect(turnSpan('q1', [marker('m1'), assistant('a1'), user('q2')])).toEqual(['q1', 'm1', 'a1']);
+  });
+
+  it('is just the question when the answer never arrived', () => {
+    expect(turnSpan('q1', [])).toEqual(['q1']);
+  });
+
+  it('stops at the next question when this one was never answered', () => {
+    expect(turnSpan('q1', [user('q2'), assistant('a2')])).toEqual(['q1']);
+  });
+});
+
+describe('knowledge is opt-in', () => {
+  const ask = (over: Partial<Parameters<typeof buildPrompt>[0]> = {}) =>
+    buildPrompt({
+      mode: AiMode.GENERAL,
+      project: null,
+      sources: [],
+      history: [],
+      question: 'what does docker compose down do',
+      ...over,
+    })[0].content;
+
+  // The complaint this fixes: a question that never needed the workspace was
+  // answered with "I couldn't find this in your knowledge base" as its opening
+  // sentence, because the prompt asked for citations that were never supplied.
+  it('never mentions sources or a knowledge base when nothing is opened to it', () => {
+    const system = ask();
+    expect(system).not.toMatch(/SOURCES/);
+    expect(system).not.toMatch(/knowledge base/i);
+    expect(system).not.toMatch(/Cite them inline/);
+  });
+
+  it('still states the rules that always apply', () => {
+    const system = ask();
+    expect(system).toMatch(/Secret values are never available/);
+    expect(system).toMatch(/Never guess at their setup/);
+  });
+
+  it('asks for citations once a source is in play', () => {
+    const system = ask({
+      sources: [source()],
+    });
+    expect(system).toMatch(/Cite them inline/);
+    expect(system).toContain('SOURCES');
+  });
+
+  it('counts an attached project as opening the workspace', () => {
+    expect(ask({ project: 'Name: Basuki Automaton' })).toMatch(/Cite them inline/);
   });
 });

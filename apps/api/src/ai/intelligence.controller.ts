@@ -140,7 +140,7 @@ export class IntelligenceController {
     @Req() request: Request,
     @Res() response: Response,
   ): Promise<void> {
-    const controller = abortOn(request);
+    const controller = abortOn(response);
     await stream(
       response,
       async function* (this: IntelligenceController) {
@@ -270,7 +270,7 @@ export class IntelligenceController {
     @Req() request: Request,
     @Res() response: Response,
   ): Promise<void> {
-    const controller = abortOn(request);
+    const controller = abortOn(response);
     await stream(response, this.chat.send(user.id, id, dto, controller.signal));
   }
 
@@ -285,6 +285,9 @@ export class IntelligenceController {
 }
 
 /* ── server-sent events ────────────────────────────────────────────────────── */
+
+/** Comfortably inside the 60s that proxies and load balancers tend to allow. */
+const KEEP_ALIVE_MS = 15_000;
 
 /**
  * Writes an async iterable out as SSE.
@@ -310,9 +313,27 @@ async function stream(
   });
   response.flushHeaders();
 
+  // Writing to a socket the client has already dropped is not an error worth
+  // reporting, but it is worth not doing.
+  const write = (payload: unknown): void => {
+    if (response.writableEnded || response.destroyed) return;
+    response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  // A cold 14B model can think for a minute before the first token, and a
+  // connection that carries nothing for a minute is one a proxy is entitled to
+  // reap. A comment frame is ignored by the client and keeps the pipe warm;
+  // this is what "the connection breaks unexpectedly" looked like from the
+  // outside when the model was simply slow to start.
+  const keepAlive = setInterval(() => {
+    if (response.writableEnded || response.destroyed) return;
+    response.write(`: keep-alive ${Date.now()}\n\n`);
+  }, KEEP_ALIVE_MS);
+  keepAlive.unref?.();
+
   try {
     for await (const event of events) {
-      response.write(`data: ${JSON.stringify(event)}\n\n`);
+      write(event);
     }
   } catch (caught) {
     const error =
@@ -323,16 +344,26 @@ async function stream(
             reason: 'SERVER',
             message: (caught as BadRequestException).message ?? 'The request failed.',
           };
-    response.write(`data: ${JSON.stringify(error)}\n\n`);
+    write(error);
   } finally {
-    response.end();
+    clearInterval(keepAlive);
+    if (!response.writableEnded) response.end();
   }
 }
 
-/** The stop button, and the closed tab, are the same signal to the model. */
-function abortOn(request: Request): AbortController {
+/**
+ * The stop button, and the closed tab, are the same signal to the model.
+ *
+ * Listened for on the response, not the request. Node emits `close` on an
+ * IncomingMessage once its body has been read, which body-parser has already
+ * done before a controller runs — so a listener attached here would either fire
+ * instantly or, as it did, never fire at all and leave Ollama generating into a
+ * socket nobody was reading. The response closes when the client actually goes
+ * away, which is the event that was wanted.
+ */
+function abortOn(response: Response): AbortController {
   const controller = new AbortController();
-  request.on('close', () => controller.abort());
+  response.on('close', () => controller.abort());
   return controller;
 }
 

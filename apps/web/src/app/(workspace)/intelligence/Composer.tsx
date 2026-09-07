@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Boxes, CornerDownLeft, Cpu, Paperclip, Square, X } from 'lucide-react';
+import { BookOpen, Boxes, CornerDownLeft, Cpu, Paperclip, Square, X } from 'lucide-react';
 import { cx } from '@/lib/format';
 import type { AiMode, Conversation, ModeDefinition, OllamaModel } from '@/lib/intelligence';
 import { KeyHint } from '@/components/primitives';
@@ -49,13 +49,16 @@ export function Composer({
   modes: ModeDefinition[];
   streaming: boolean;
   attachments: { ref: string; label: string }[];
-  onSend: (text: string) => void;
+  /** Resolves false when nothing was generated, so the text can come back. */
+  onSend: (text: string) => Promise<boolean>;
   onStop: () => void;
   onCommand: (command: string, argument: string) => void;
   onDetach: (ref: string) => void;
   onAttach: () => void;
 }) {
   const [value, setValue] = useState('');
+  const usingKnowledge =
+    (conversation?.sources.length ?? 0) > 0 || Boolean(conversation?.projectId);
   const input = useRef<HTMLTextAreaElement>(null);
 
   const completions = useMemo(() => {
@@ -72,7 +75,7 @@ export function Composer({
     node.style.height = `${Math.min(node.scrollHeight, 220)}px`;
   }, [value]);
 
-  function submit() {
+  async function submit(): Promise<void> {
     const text = value.trim();
     if (!text) return;
 
@@ -83,8 +86,16 @@ export function Composer({
       return;
     }
     if (streaming) return;
-    onSend(text);
+
+    // Cleared optimistically, because a box that stays full while the answer
+    // streams invites sending it twice — and restored if the send came to
+    // nothing, because retyping a paragraph is not the developer's job.
     setValue('');
+    const ok = await onSend(text);
+    if (!ok) {
+      setValue((current) => (current.trim() ? current : text));
+      input.current?.focus();
+    }
   }
 
   return (
@@ -155,11 +166,11 @@ export function Composer({
             // safe to reach, because a pasted stack trace needs one (§52).
             if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
               event.preventDefault();
-              submit();
+              void submit();
             }
             if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
               event.preventDefault();
-              submit();
+              void submit();
             }
           }}
           placeholder={
@@ -180,7 +191,7 @@ export function Composer({
           </button>
         ) : (
           <button
-            onClick={submit}
+            onClick={() => void submit()}
             disabled={!value.trim()}
             className="inline-flex h-[26px] shrink-0 items-center gap-[6px] rounded border border-line bg-[var(--surface-raised)] px-[9px] text-[11.5px] transition-colors hover:border-[var(--line-strong)] disabled:opacity-40"
           >
@@ -200,6 +211,23 @@ export function Composer({
             )}
         </span>
         <span>{modes.find((mode) => mode.mode === conversation?.mode)?.label ?? 'General'}</span>
+        {/* Visible without opening the panel: whether this conversation is
+            reading your records at all is the thing most worth knowing about
+            an answer before you trust it. */}
+        <span
+          className={cx(
+            'flex items-center gap-[5px]',
+            usingKnowledge ? 'text-[var(--accent)]' : undefined,
+          )}
+          title={
+            usingKnowledge
+              ? 'Your own records are searched for each question, and cited.'
+              : 'The model is answering on its own. Turn on workspace knowledge in the context panel.'
+          }
+        >
+          <BookOpen size={10} />
+          {usingKnowledge ? 'knowledge on' : 'knowledge off'}
+        </span>
         {conversation?.project && (
           <span className="flex items-center gap-[5px]">
             <Boxes size={10} /> {conversation.project.name}

@@ -27,6 +27,7 @@ and no external dependency the app needs in order to work.
 | Database | PostgreSQL 17 + `pgvector` + Prisma                       |
 | Queue    | Redis + BullMQ                                            |
 | Auth     | Argon2id, JWT access + rotating refresh, httpOnly cookies |
+| Local AI | Ollama on your own machine — chat, and optionally embeddings |
 | Tests    | Jest (unit), Playwright (end-to-end)                      |
 
 ## First run
@@ -96,6 +97,49 @@ The application is keyboard-first.
 | `[` / `]`       | Toggle the navigation rail / context panel |
 | `?`             | Every shortcut                             |
 
+## The Developer Intelligence console
+
+`g a` opens a chat assistant that runs on a **local Ollama** — your questions,
+your records and the answers never leave the machine. There is no key to
+configure and no enable flag: if Ollama answers, the console works.
+
+```bash
+ollama serve                  # or the desktop app
+ollama pull llama3.1:8b       # any chat model — the console discovers what you have
+```
+
+Then pick the model at `g m` (Local Models), which also pulls and removes them.
+Answers stream token by token; stopping one keeps what had already arrived.
+
+What makes it more than a chat window is that it can read what you have already
+written. Each conversation has:
+
+- **A mode** — General, Project, Troubleshooting, Documentation, Code,
+  Infrastructure or Knowledge. A mode is a system prompt and a retrieval bias,
+  not a model, so switching it mid-conversation costs nothing.
+- **Sources you opened to it** — the record types this conversation may quote.
+  A new conversation starts with none; the mode only suggests. Prose is
+  retrieved by meaning and cited inline as `[1]`, `[2]`; rows like servers and
+  tasks are listed as a compact brief, because a paraphrased hostname is worse
+  than the hostname.
+- **A project**, optionally, which narrows all of it to that project, and any
+  records you pin — those are sent every turn, unlike retrieved passages, which
+  are chosen per question.
+
+An answer worth keeping saves straight back into the workspace as a note,
+solution, ADR or task — indexed like anything else, so the next conversation
+can cite it. Point at any earlier turn to rewind there, or edit the question and
+ask again; everything after it is replaced rather than left dangling.
+
+**The vault is never part of this.** Vault items are not indexed, cannot be
+selected as a source, and are dropped even if a stored conversation asks for
+them. The model can say a credential exists and where it is filed. It can never
+read one.
+
+With Ollama stopped, retrieval still works on its own at
+`/intelligence/retrieval` — it returns your own passages, just with nothing
+written on top of them.
+
 ## Build phases
 
 Built in eight phases against a fixed specification. All of them are done; the
@@ -153,6 +197,7 @@ it. None of these is a dependency of anything else.
 | ------------------- | --------------------------------------------------------------------------- |
 | `ANTHROPIC_API_KEY` | Retrieval still runs and returns your own passages — just no written answer |
 | `OPENAI_API_KEY`    | Search matches words rather than meaning, offline, with no account          |
+| Ollama              | No console; retrieval still returns your passages at `/intelligence/retrieval` |
 | `MAIL_HOST`         | Notifications stay in the app and in the browser                            |
 | GitHub / GitLab     | Repository records are whatever you typed                                   |
 | Cloudflare          | Domains are entered by hand                                                 |

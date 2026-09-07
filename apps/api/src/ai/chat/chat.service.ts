@@ -80,14 +80,22 @@ export class ChatService {
       : null;
     const mode = dto.mode ?? profile?.mode ?? conversation.mode;
 
-    // A regenerate re-asks the previous question, so the failed or unwanted
-    // answer is removed first — leaving it would put two replies in the thread.
-    if (dto.regenerate) await this.dropLastAnswer(conversationId);
+    // Rewinding happens before the history is read, so the turn being replaced
+    // is gone by the time the prompt is built. `at` is the slot it occupied:
+    // the replacement goes back into it rather than onto the end.
+    const at = dto.fromMessageId ? await this.rewind(conversationId, dto.fromMessageId) : null;
 
     const question = dto.message.trim();
     const history = settings.retainMessages
       ? await this.prisma.aiMessage.findMany({
-          where: { conversationId, role: { in: [AiRole.USER, AiRole.ASSISTANT] } },
+          where: {
+            conversationId,
+            role: { in: [AiRole.USER, AiRole.ASSISTANT] },
+            // Only what came before the turn being replaced. Showing the model
+            // the turns that follow would be asking it to write the past with
+            // the future already in hand.
+            ...(at ? { createdAt: { lt: at } } : {}),
+          },
           orderBy: { createdAt: 'asc' },
           select: { role: true, content: true },
         })
@@ -110,7 +118,15 @@ export class ChatService {
     // typed because a server was busy is the worst failure this can have.
     if (settings.retainMessages) {
       await this.prisma.aiMessage.create({
-        data: { conversationId, role: AiRole.USER, content: question },
+        data: {
+          conversationId,
+          role: AiRole.USER,
+          content: question,
+          // Keeping the original timestamp is what keeps the turn in place.
+          // Ordering is by createdAt, so a replacement stamped `now` would
+          // reappear at the bottom of a conversation it came from the middle of.
+          ...(at ? { createdAt: at } : {}),
+        },
       });
     }
     await this.prisma.aiConversation.update({
@@ -176,6 +192,7 @@ export class ChatService {
               durationMs: Date.now() - started,
               promptTokens,
               completionTokens,
+              at,
             })
           : null;
 
@@ -213,6 +230,7 @@ export class ChatService {
       durationMs,
       promptTokens,
       completionTokens,
+      at,
     });
 
     await this.closeUsage(usage.id, {
@@ -247,6 +265,8 @@ export class ChatService {
       durationMs: number;
       promptTokens: number | null;
       completionTokens: number | null;
+      /** The slot the replaced turn occupied, when this is a rewind. */
+      at?: Date | null;
     },
   ): Promise<string | null> {
     if (!input.settings.retainMessages) return null;
@@ -271,6 +291,9 @@ export class ChatService {
         durationMs: input.durationMs,
         promptTokens: input.promptTokens,
         completionTokens: input.completionTokens,
+        // A millisecond after its question, which is still comfortably before
+        // whatever came next: the original answer took seconds to arrive.
+        ...(input.at ? { createdAt: new Date(input.at.getTime() + 1) } : {}),
       },
     });
     return message.id;
@@ -301,20 +324,78 @@ export class ChatService {
     });
   }
 
-  /** Removes the trailing assistant turn, and the user turn that prompted it. */
-  private async dropLastAnswer(conversationId: string): Promise<void> {
-    const recent = await this.prisma.aiMessage.findMany({
-      where: { conversationId },
-      orderBy: { createdAt: 'desc' },
-      take: 2,
+  /**
+   * Clears one turn so it can be asked again, and returns the slot it held.
+   *
+   * A turn is a question and the answer it drew. Only those two rows go: an
+   * earlier version of this deleted everything from the anchor to the end of
+   * the conversation, on the reasoning that a later answer no longer follows
+   * from an edited question. That reasoning is defensible and the behaviour was
+   * not — regenerating the second answer of six silently destroyed four turns
+   * of work, with no warning and nothing to undo it. Losing what someone wrote
+   * is worse than a thread that reads a little out of step, and the model is
+   * shown only the turns before this one so what it writes is at least honest
+   * about what it had.
+   *
+   * An id that is not in this conversation clears nothing, so a stale
+   * transcript in another tab cannot cut into the wrong thread.
+   */
+  private async rewind(conversationId: string, messageId: string): Promise<Date | null> {
+    const anchor = await this.prisma.aiMessage.findFirst({
+      where: { id: messageId, conversationId },
+      select: { id: true, role: true, createdAt: true },
     });
-    const ids = recent
-      .filter((row) => row.role === AiRole.ASSISTANT || row.role === AiRole.USER)
-      .map((row) => row.id);
-    if (ids.length > 0) await this.prisma.aiMessage.deleteMany({ where: { id: { in: ids } } });
+    if (!anchor) return null;
+
+    // Normalise to the question. Regenerate points at the answer from some
+    // callers and at the question from others; a turn begins at its question
+    // either way.
+    const question =
+      anchor.role === AiRole.USER
+        ? anchor
+        : ((await this.prisma.aiMessage.findFirst({
+            where: { conversationId, role: AiRole.USER, createdAt: { lt: anchor.createdAt } },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true, role: true, createdAt: true },
+          })) ?? anchor);
+
+    // Everything between this question and the next one — its answer, and any
+    // marker written alongside it.
+    const after = await this.prisma.aiMessage.findMany({
+      where: { conversationId, createdAt: { gt: question.createdAt } },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, role: true },
+    });
+
+    await this.prisma.aiMessage.deleteMany({
+      where: { id: { in: turnSpan(question.id, after) } },
+    });
+    return question.createdAt;
   }
 
   private defaultModel(fromSettings: string | null): string {
     return fromSettings ?? this.config.get<string>('ollama.chatModel') ?? '';
   }
+}
+
+/**
+ * The rows that make up one turn: a question, and the reply it drew.
+ *
+ * Stops at the next question, so nothing beyond this turn is ever included —
+ * that boundary is the whole point, and getting it wrong deletes someone's
+ * conversation. A marker written between the two (a model switch, say) belongs
+ * to the turn it interrupted and goes with it.
+ *
+ * `following` must be every message after the question, oldest first.
+ */
+export function turnSpan(questionId: string, following: { id: string; role: AiRole }[]): string[] {
+  const span = [questionId];
+  for (const row of following) {
+    // The next question begins the next turn, and this one is over.
+    if (row.role === AiRole.USER) break;
+    span.push(row.id);
+    // An answer ends the turn. Anything after it belongs to what came next.
+    if (row.role === AiRole.ASSISTANT) break;
+  }
+  return span;
 }
